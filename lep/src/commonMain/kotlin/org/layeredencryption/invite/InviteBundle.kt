@@ -7,6 +7,7 @@ import org.layeredencryption.HybridSignature
 import org.layeredencryption.KeyPair
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
+import org.layeredencryption.XWing
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.longToBigEndian8
 
@@ -60,12 +61,16 @@ class InviteBundle(
             return InviteBundle(inviteXWingPublicKey, deviceIdentityA, expiryEpochSeconds, signature)
         }
 
+        /** Strict: exact field sizes and full consumption; anything else is [IllegalArgumentException]. */
         fun deserialise(bytes: ByteArray): InviteBundle {
             val reader = FrameReader(bytes)
             val inviteXWingPublicKey = reader.readBytes()
+            require(inviteXWingPublicKey.size == XWing.PUBLIC_KEY_SIZE) { "Invite KEM key has wrong size" }
             val deviceIdentityA = DeviceIdentity.deserialise(reader.readBytes())
             val expiry = bigEndian8ToLong(reader.readBytes())
             val signature = reader.readBytes()
+            require(signature.size == HybridSignature.SIGNATURE_SIZE) { "Bundle signature has wrong size" }
+            reader.expectEnd()
             return InviteBundle(inviteXWingPublicKey, deviceIdentityA, expiry, signature)
         }
 

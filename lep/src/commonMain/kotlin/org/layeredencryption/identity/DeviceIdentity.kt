@@ -73,14 +73,30 @@ class DeviceIdentity(
     companion object {
         private const val BINDING_SUFFIX = ProtocolLabels.DEVICE_IDENTITY
 
-        fun deserialise(bytes: ByteArray): DeviceIdentity = deserialise(FrameReader(bytes))
+        private const val X25519_KEY_SIZE = 32
 
-        internal fun deserialise(reader: FrameReader): DeviceIdentity = DeviceIdentity(
-            signingPublicKey = reader.readBytes(),
-            x25519IdentityPublicKey = reader.readBytes(),
-            xWingPublicKey = reader.readBytes(),
-            bindingSignature = reader.readBytes(),
-        )
+        /**
+         * Strict: every field has exactly one legal length (the format has no variability at
+         * all — see the class doc's byte layout), and the frame must be fully consumed.
+         */
+        fun deserialise(bytes: ByteArray): DeviceIdentity {
+            val reader = FrameReader(bytes)
+            val identity = deserialise(reader)
+            reader.expectEnd()
+            return identity
+        }
+
+        internal fun deserialise(reader: FrameReader): DeviceIdentity {
+            val signingPublicKey = reader.readBytes()
+            require(signingPublicKey.size == HybridSignature.PUBLIC_KEY_SIZE) { "Signing key has wrong size" }
+            val x25519IdentityPublicKey = reader.readBytes()
+            require(x25519IdentityPublicKey.size == X25519_KEY_SIZE) { "X25519 identity key has wrong size" }
+            val xWingPublicKey = reader.readBytes()
+            require(xWingPublicKey.size == XWing.PUBLIC_KEY_SIZE) { "X-Wing key has wrong size" }
+            val bindingSignature = reader.readBytes()
+            require(bindingSignature.size == HybridSignature.SIGNATURE_SIZE) { "Binding signature has wrong size" }
+            return DeviceIdentity(signingPublicKey, x25519IdentityPublicKey, xWingPublicKey, bindingSignature)
+        }
 
         internal fun bindingMessage(
             signingPublicKey: ByteArray,

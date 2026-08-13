@@ -83,13 +83,16 @@ class PairingCode private constructor(
 
         /**
          * Folds raw user input into the canonical form `S`, or returns `null` if it is not a valid
-         * code. Strips separators/whitespace, uppercases, then folds the one forgiven pair: O→0.
+         * code. Strips the documented separators — hyphens and whitespace — uppercases, then folds
+         * the one forgiven pair: O→0. Any *other* character rejects the whole input rather than
+         * being silently dropped: an earlier version stripped everything non-alphanumeric, which
+         * made unboundedly many strings canonicalise to the same code.
          */
         fun canonicalise(raw: String): String? {
             val folded = StringBuilder(LENGTH)
             for (char in raw.uppercase()) {
-                val mapped = fold(char) ?: continue // skip separators/whitespace
-                if (mapped !in ALPHABET) return null
+                if (char == '-' || char.isWhitespace()) continue // the documented separators
+                val mapped = fold(char) ?: return null
                 folded.append(mapped)
             }
             return if (folded.length == LENGTH) folded.toString() else null
@@ -97,8 +100,8 @@ class PairingCode private constructor(
 
         private fun fold(char: Char): Char? = when (char) {
             'O' -> '0' // the only forgiven confusable; I/L/1 stay distinct (colour + font disambiguate)
-            in 'A'..'Z', in '0'..'9' -> char
-            else -> null // hyphens, spaces, anything else is dropped
+            in 'A'..'N', in 'P'..'Z', in '0'..'9' -> char // the 35-symbol alphabet ('O' folded above)
+            else -> null // not a code character
         }
     }
 }

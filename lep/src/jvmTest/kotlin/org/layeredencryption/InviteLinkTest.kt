@@ -33,7 +33,16 @@ class InviteLinkTest {
     @Test
     fun link_parsesFromAFullUrl() {
         val url = InviteLink(ByteArray(32) { it.toByte() }, ByteArray(16) { it.toByte() }).url()
-        assertContentEquals(ByteArray(32) { it.toByte() }, InviteLink.parse(url)?.secret)
+        assertContentEquals(ByteArray(32) { it.toByte() }, InviteLink.parseUrl(url)?.secret)
+    }
+
+    @Test
+    fun link_urlParsingRequiresTheCanonicalOrigin() {
+        val fragment = InviteLink(ByteArray(32), ByteArray(16)).fragment()
+        assertNull(InviteLink.parseUrl("https://evil.example/join#$fragment"), "wrong origin")
+        assertNull(InviteLink.parseUrl("http://calendite.com/join#$fragment"), "not https")
+        assertNull(InviteLink.parseUrl("https://calendite.com/other#$fragment"), "wrong path")
+        assertNull(InviteLink.parse("https://calendite.com/join#$fragment"), "a URL is not a bare fragment")
     }
 
     @Test

@@ -65,13 +65,33 @@ class EpochKeys private constructor(private val byEpoch: Map<Int, ByteArray>) {
 
         fun of(byEpoch: Map<Int, ByteArray>): EpochKeys = EpochKeys(byEpoch)
 
-        /** Reads [serialise]. Returns null rather than throwing on anything malformed. */
+        /** One rotation per revoke: even an absurdly churned context stays far below this. */
+        private const val MAX_EPOCHS = 10_000
+
+        private const val EPOCH_BYTES = 4
+        private const val KEY_BYTES = 32
+
+        /**
+         * Reads [serialise]. Returns null rather than throwing on anything malformed — and
+         * "malformed" is strict: epochs must be exactly 4 bytes and strictly ascending (which
+         * makes them unique and the encoding canonical), keys exactly 32 bytes, and the count
+         * bounded. Accepting a duplicate epoch would let later bytes silently replace an
+         * earlier key.
+         */
         fun deserialise(bytes: ByteArray): EpochKeys? = runCatching {
             val reader = FrameReader(bytes)
             val byEpoch = mutableMapOf<Int, ByteArray>()
+            var previousEpoch = -1
             while (reader.hasRemaining()) {
-                val epoch = bytesToInt(reader.readBytes(), 0)
-                byEpoch[epoch] = reader.readBytes()
+                require(byEpoch.size < MAX_EPOCHS) { "More than $MAX_EPOCHS epochs" }
+                val epochBytes = reader.readBytes()
+                require(epochBytes.size == EPOCH_BYTES) { "Epoch must be $EPOCH_BYTES bytes" }
+                val epoch = bytesToInt(epochBytes, 0)
+                require(epoch > previousEpoch) { "Epochs must be unique and ascending" }
+                val key = reader.readBytes()
+                require(key.size == KEY_BYTES) { "Epoch key must be $KEY_BYTES bytes" }
+                byEpoch[epoch] = key
+                previousEpoch = epoch
             }
             EpochKeys(byEpoch)
         }.getOrNull()

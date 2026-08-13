@@ -6,6 +6,7 @@ import org.layeredencryption.CryptoProvider
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
 import org.layeredencryption.ProtocolNamespace
+import org.layeredencryption.decodeUtf8Strict
 
 /**
  * One encrypted op in a device's lane (docs/Protocol.md §7.1).
@@ -54,16 +55,45 @@ class LaneEnvelope(
         /** v2 added [epoch]. A v1 reader would take that field for the ciphertext. */
         const val VERSION = 2
 
+        /** Generous bound on the id/lane strings; real values are ~64-char hex names. */
+        private const val MAX_NAME_BYTES = 1024
+
+        /**
+         * Strict: the version must be exactly [VERSION] (an unknown version is rejected *here*,
+         * before any of its fields are believed), numeric fields must be canonical non-negative
+         * decimal, strings must be valid UTF-8 within [MAX_NAME_BYTES], and the frame must be
+         * fully consumed. Every failure is an [IllegalArgumentException].
+         */
         fun deserialise(bytes: ByteArray): LaneEnvelope {
             val reader = FrameReader(bytes)
-            return LaneEnvelope(
-                version = reader.readBytes().decodeToString().toInt(),
-                contextId = reader.readBytes().decodeToString(),
-                lane = reader.readBytes().decodeToString(),
-                seq = reader.readBytes().decodeToString().toInt(),
-                epoch = reader.readBytes().decodeToString().toInt(),
+            val version = canonicalNonNegativeInt(reader.readBytes())
+            require(version == VERSION) { "Unsupported envelope version $version" }
+            val envelope = LaneEnvelope(
+                version = version,
+                contextId = readName(reader),
+                lane = readName(reader),
+                seq = canonicalNonNegativeInt(reader.readBytes()),
+                epoch = canonicalNonNegativeInt(reader.readBytes()),
                 ciphertext = reader.readBytes(),
             )
+            reader.expectEnd()
+            return envelope
+        }
+
+        private fun readName(reader: FrameReader): String {
+            val bytes = reader.readBytes()
+            require(bytes.size <= MAX_NAME_BYTES) { "Envelope name field exceeds $MAX_NAME_BYTES bytes" }
+            return bytes.decodeUtf8Strict()
+        }
+
+        /** Exactly the digits [Int.toString] produces: no sign, no leading zero, no whitespace. */
+        private fun canonicalNonNegativeInt(bytes: ByteArray): Int {
+            val text = bytes.decodeUtf8Strict()
+            val value = text.toIntOrNull()
+            require(value != null && value >= 0 && value.toString() == text) {
+                "Non-canonical integer field: $text"
+            }
+            return value
         }
 
         /**

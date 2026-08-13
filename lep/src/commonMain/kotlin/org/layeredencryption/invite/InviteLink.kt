@@ -51,17 +51,30 @@ class InviteLink(val secret: ByteArray, val fingerprint: ByteArray) {
             provider.sha256(identity.signingPublicKey).copyOfRange(0, FINGERPRINT_SIZE)
 
         /**
-         * Strictly parses a fragment payload (`A2.<secret>.<fp>`), or returns `null` if malformed.
-         * Legacy `A1` links are rejected here by the tag check — their 64-bit secrets are
+         * Strictly parses a **bare** fragment payload (`A2.<secret>.<fp>`), or returns `null` if
+         * malformed. Anything URL-shaped (containing `#`, `/`, or `:`) is rejected here — full
+         * links go through [parseUrl], which checks the origin. An earlier version took whatever
+         * followed `#`, which accepted a link from any origin at all.
+         *
+         * Legacy `A1` links are rejected by the tag check — their 64-bit secrets are
          * brute-forceable offline and must not be honoured.
          */
         fun parse(fragment: String): InviteLink? {
-            val body = fragment.substringAfter('#', fragment) // tolerate a full URL or bare fragment
-            val parts = body.split('.')
+            if (fragment.any { it == '#' || it == '/' || it == ':' }) return null
+            val parts = fragment.split('.')
             if (parts.size != 3 || parts[0] != TAG) return null
             val secret = decode(parts[1], SECRET_SIZE) ?: return null
             val fingerprint = decode(parts[2], FINGERPRINT_SIZE) ?: return null
             return InviteLink(secret, fingerprint)
+        }
+
+        /**
+         * Strictly parses a full invite URL, requiring the exact canonical origin and path
+         * (`https://calendite.com/join#…`) before the fragment is even looked at.
+         */
+        fun parseUrl(url: String): InviteLink? {
+            if (!url.startsWith(URL_PREFIX)) return null
+            return parse(url.removePrefix(URL_PREFIX))
         }
 
         @OptIn(ExperimentalEncodingApi::class)

@@ -93,17 +93,25 @@ class MembershipEntry(
 
         internal fun deserialise(reader: FrameReader): MembershipEntry {
             val previousHash = reader.readBytes()
+            require(previousHash.size == GENESIS_PREVIOUS_HASH.size) { "previousHash must be a SHA-256 hash" }
             val op = MembershipOp.fromCode(reader.readByte())
             val deviceIdentity = DeviceIdentity.deserialise(reader.readBytes())
             val wrappedBytes = reader.readBytes()
-            val hasWrapped = reader.readByte() == 1
+            val wrappedFlag = reader.readByte()
+            // A canonical flag, strictly: any other byte, or absent-but-nonempty, would let two
+            // different serialisations parse to the same logical entry and desynchronise the
+            // byte-compared paths (prefix comparison, hashes).
+            require(wrappedFlag == 0 || wrappedFlag == 1) { "wrappedKeys flag must be 0 or 1" }
+            require(wrappedFlag == 1 || wrappedBytes.isEmpty()) { "Absent wrappedKeys must be empty" }
             val signerPublicKey = reader.readBytes()
+            require(signerPublicKey.size == HybridSignature.PUBLIC_KEY_SIZE) { "Signer key has wrong size" }
             val signature = reader.readBytes()
+            require(signature.size == HybridSignature.SIGNATURE_SIZE) { "Signature has wrong size" }
             return MembershipEntry(
                 previousHash = previousHash,
                 op = op,
                 deviceIdentity = deviceIdentity,
-                wrappedKeys = if (hasWrapped) wrappedBytes else null,
+                wrappedKeys = if (wrappedFlag == 1) wrappedBytes else null,
                 signerPublicKey = signerPublicKey,
                 signature = signature,
             )
@@ -309,6 +317,10 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
      * applied (genesis self-signs). Returns the resulting active-member set, or the first failure.
      */
     fun verify(provider: CryptoProvider): MembershipVerification {
+        // An empty log has no genesis and therefore no founder; every other method here assumes
+        // entry zero exists. Calling it valid-with-no-members would let a wiped log verify.
+        if (entries.isEmpty()) return MembershipVerification.Invalid("Empty log has no genesis entry", 0)
+
         val members = mutableSetOf<String>()
         var expectedPrevious = MembershipEntry.GENESIS_PREVIOUS_HASH
 
@@ -376,11 +388,18 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
             listOf(signEntry(provider, MembershipEntry.GENESIS_PREVIOUS_HASH, MembershipOp.ADD, founder, wrappedKeys, signer)),
         )
 
+        /** Far beyond any real device list; the bound is what stops 16 MB of confetti becoming 16 MB of list. */
+        private const val MAX_ENTRIES = 10_000
+
         fun deserialise(data: ByteArray): MembershipLog {
             val reader = FrameReader(data)
             val entries = mutableListOf<MembershipEntry>()
             while (reader.hasRemaining()) {
-                entries.add(MembershipEntry.deserialise(FrameReader(reader.readBytes())))
+                require(entries.size < MAX_ENTRIES) { "Membership log exceeds $MAX_ENTRIES entries" }
+                val entryReader = FrameReader(reader.readBytes())
+                val entry = MembershipEntry.deserialise(entryReader)
+                entryReader.expectEnd()
+                entries.add(entry)
             }
             return MembershipLog(entries)
         }

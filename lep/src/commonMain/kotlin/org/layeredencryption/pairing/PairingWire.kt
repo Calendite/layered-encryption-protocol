@@ -71,11 +71,24 @@ object PairingWire {
         InviterComplete(reader.readBytes())
     }
 
+    /**
+     * The single decode boundary: the tag must match, the fields must consume the frame exactly
+     * (trailing bytes rejected), and any malformed-frame failure surfaces as [PairingException] —
+     * a hostile frame cannot pick which exception type escapes.
+     */
     private inline fun <T> expect(frame: ByteArray, tag: Int, read: (FrameReader) -> T): T {
-        val reader = FrameReader(frame)
-        val actual = reader.readByte()
-        if (actual != tag) throw PairingException("Expected pairing message $tag, got $actual")
-        return read(reader)
+        try {
+            val reader = FrameReader(frame)
+            val actual = reader.readByte()
+            if (actual != tag) throw PairingException("Expected pairing message $tag, got $actual")
+            val message = read(reader)
+            reader.expectEnd()
+            return message
+        } catch (e: PairingException) {
+            throw e
+        } catch (e: Exception) {
+            throw PairingException("Malformed pairing message $tag")
+        }
     }
 }
 

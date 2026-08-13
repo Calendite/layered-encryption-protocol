@@ -80,12 +80,15 @@ object WrappedKeys {
     ): ByteArray? = runCatching {
         val own = device.identity.signingPublicKey.toHexString()
         val reader = FrameReader(blob)
+        var copies = 0
         while (reader.hasRemaining()) {
+            require(++copies <= MAX_RECIPIENTS) { "More than $MAX_RECIPIENTS wrapped copies" }
             val memberId = reader.readBytes().decodeToString()
             val kemCiphertext = reader.readBytes()
             val sealed = reader.readBytes()
             if (memberId != own) continue
 
+            require(kemCiphertext.size == XWing.CIPHERTEXT_SIZE) { "Wrapped-copy KEM ciphertext has wrong size" }
             val sharedSecret = XWing.decapsulate(provider, device.xWingPrivateKey, kemCiphertext)
             val wrapKey = wrapKey(provider, sharedSecret, namespace)
             return@runCatching Cascade.open(
@@ -100,12 +103,16 @@ object WrappedKeys {
         val recipients = mutableListOf<String>()
         val reader = FrameReader(blob)
         while (reader.hasRemaining()) {
+            require(recipients.size < MAX_RECIPIENTS) { "More than $MAX_RECIPIENTS wrapped copies" }
             recipients += reader.readBytes().decodeToString()
             reader.readBytes()
             reader.readBytes()
         }
         recipients.toList()
     }.getOrDefault(emptyList())
+
+    /** Far beyond any real member list; bounds what hostile framing can make these loops build. */
+    private const val MAX_RECIPIENTS = 4_096
 
     private fun wrapKey(
         provider: CryptoProvider,

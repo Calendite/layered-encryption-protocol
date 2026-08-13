@@ -35,24 +35,48 @@ class FrameWriter {
     }
 }
 
-/** Reads back a byte stream produced by [FrameWriter]. */
+/**
+ * Reads back a byte stream produced by [FrameWriter].
+ *
+ * All bounds arithmetic is checked subtraction (`length <= data.size - position`), never
+ * `position + length`, because a hostile 4-byte length can be up to `Int.MAX_VALUE` and addition
+ * would wrap negative and slip past the guard. Every failure is an [IllegalArgumentException];
+ * no input reaches the copy with out-of-range indices.
+ */
 class FrameReader(private val data: ByteArray) {
     private var position = 0
 
     fun readByte(): Int {
-        require(position + 1 <= data.size) { "Frame underflow reading byte" }
+        require(data.size - position >= 1) { "Frame underflow reading byte" }
         return data[position++].toInt() and 0xFF
     }
 
     fun readBytes(): ByteArray {
-        require(position + 4 <= data.size) { "Frame underflow reading length" }
+        require(data.size - position >= 4) { "Frame underflow reading length" }
         val length = bytesToInt(data, position)
         position += 4
-        require(length >= 0 && position + length <= data.size) { "Frame underflow reading $length bytes" }
+        require(length >= 0) { "Negative frame length $length" }
+        require(length <= data.size - position) { "Frame underflow reading $length bytes" }
         return data.copyOfRange(position, position + length).also { position += length }
     }
 
     fun hasRemaining(): Boolean = position < data.size
+
+    /**
+     * Strict decoders call this after the final field: trailing bytes mean the input is a
+     * different message than the one just read, and accepting it would let two byte strings
+     * deserialise to the same logical value.
+     */
+    fun expectEnd() {
+        require(!hasRemaining()) { "Trailing bytes after the final field" }
+    }
+}
+
+/** Strict UTF-8 for wire strings: a malformed sequence is rejected, never replaced with U+FFFD. */
+fun ByteArray.decodeUtf8Strict(): String = try {
+    decodeToString(throwOnInvalidSequence = true)
+} catch (e: CharacterCodingException) {
+    throw IllegalArgumentException("Malformed UTF-8 in wire string")
 }
 
 /** Lowercase, fixed 2-digits-per-byte hex, used as a stable set key for device public keys. */
