@@ -234,7 +234,7 @@ class AsyncJoiner(
         val verification = log.verify(provider)
         if (verification !is MembershipVerification.Valid) throw PairingException("Membership log failed verification: $verification")
 
-        val ownKey = device.identity.ed25519PublicKey
+        val ownKey = device.identity.signingPublicKey
         if (ownKey.toHexString() !in verification.activeMembers) throw PairingException("This device is not in the membership log")
 
         val entry = log.addEntryFor(ownKey) ?: throw PairingException("No ADD entry for this device")

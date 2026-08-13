@@ -1,5 +1,7 @@
 package org.layeredencryption.pairing
 
+import org.layeredencryption.ProtocolLabels
+import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.CryptoProvider
 
 /**
@@ -12,9 +14,13 @@ import org.layeredencryption.CryptoProvider
  */
 object Rendezvous {
 
-    private val LABEL = "calendite/rendezvous/v1".encodeToByteArray()
+    private const val SUFFIX = ProtocolLabels.RENDEZVOUS
 
     /** Derives the rendezvous id from a canonical pairing code (`S`). */
-    fun id(provider: CryptoProvider, canonicalCode: String): ByteArray =
-        provider.sha256(LABEL + canonicalCode.encodeToByteArray())
+    fun id(
+        provider: CryptoProvider,
+        canonicalCode: String,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): ByteArray =
+        provider.sha256(namespace.label(SUFFIX) + canonicalCode.encodeToByteArray())
 }

@@ -28,10 +28,11 @@ object PairingWire {
         .putByte(TAG_INVITER_HELLO)
         .putBytes(message.xWingPublicKey)
         .putBytes(message.inviterDeviceIdentity.serialise())
+        .putBytes(message.sasCommitment)
         .toByteArray()
 
     fun decodeInviterHello(frame: ByteArray): InviterHello = expect(frame, TAG_INVITER_HELLO) { reader ->
-        InviterHello(reader.readBytes(), DeviceIdentity.deserialise(reader.readBytes()))
+        InviterHello(reader.readBytes(), DeviceIdentity.deserialise(reader.readBytes()), reader.readBytes())
     }
 
     fun encode(message: JoinerResponse): ByteArray = FrameWriter()
@@ -48,10 +49,11 @@ object PairingWire {
     fun encode(message: InviterConfirm): ByteArray = FrameWriter()
         .putByte(TAG_INVITER_CONFIRM)
         .putBytes(message.inviterMac)
+        .putBytes(message.sasNonce)
         .toByteArray()
 
     fun decodeInviterConfirm(frame: ByteArray): InviterConfirm = expect(frame, TAG_INVITER_CONFIRM) { reader ->
-        InviterConfirm(reader.readBytes())
+        InviterConfirm(reader.readBytes(), reader.readBytes())
     }
 
     fun encodeSasConfirmed(): ByteArray = FrameWriter().putByte(TAG_SAS_CONFIRMED).toByteArray()

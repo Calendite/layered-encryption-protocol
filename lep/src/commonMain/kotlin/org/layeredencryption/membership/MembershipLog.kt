@@ -1,10 +1,14 @@
 package org.layeredencryption.membership
 
+import org.layeredencryption.ProtocolLabels
+import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.CryptoProvider
+import org.layeredencryption.HybridSignature
 import org.layeredencryption.KeyPair
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
 import org.layeredencryption.identity.DeviceIdentity
+import org.layeredencryption.identity.DeviceKeys
 import org.layeredencryption.toHexString
 
 /** Membership operations (docs/Protocol.md §4.7). */
@@ -20,10 +24,35 @@ enum class MembershipOp(val code: Int) {
 }
 
 /**
+ * What two versions of a log turned out to be, once compared.
+ *
+ * [Forked] is the interesting one, and deliberately does not resolve itself. It says which branch
+ * to build on and where the two parted company, and leaves the caller to decide what to do about
+ * the entries on the losing side, because the right answer differs by operation: a lost removal
+ * must be re-asserted, a lost addition is better reported than silently re-applied.
+ */
+sealed interface Reconciliation {
+    /** Not the same calendar: not one shared entry, not even genesis. Never adopt. */
+    data object Unrelated : Reconciliation
+
+    /** Byte-identical. */
+    data object Same : Reconciliation
+
+    /** Theirs is ours with more on the end; adopt it. */
+    data object TheyExtendUs : Reconciliation
+
+    /** Ours is theirs with more on the end; keep ours and offer it. */
+    data object WeExtendThem : Reconciliation
+
+    /** Both appended after [sharedPrefix]. [theirsWins] is the deterministic tie-break. */
+    data class Forked(val sharedPrefix: Int, val theirsWins: Boolean) : Reconciliation
+}
+
+/**
  * One entry in the append-only membership log (docs/Protocol.md §4.7):
  * `{ prev_hash, op, device_identity, wrapped_keys?, sig }`, every entry signed by a device that was
  * already a member. The subject is a full [DeviceIdentity] (Async_Invites_Spec.md §3), so its
- * Ed25519↔X25519 binding is verifiable from the log alone. [wrappedKeys] carries the calendar keys
+ * Ed25519↔X25519 binding is verifiable from the log alone. [wrappedKeys] carries the context keys
  * wrapped for a newly-added device.
  */
 class MembershipEntry(
@@ -35,8 +64,8 @@ class MembershipEntry(
     val signature: ByteArray,
 ) {
     /** The signed-over bytes (everything except the signature itself). */
-    internal fun unsignedBytes(): ByteArray = FrameWriter()
-        .putBytes(LABEL)
+    internal fun unsignedBytes(namespace: ProtocolNamespace = ProtocolNamespace.Default): ByteArray = FrameWriter()
+        .putBytes(namespace.label(SUFFIX))
         .putBytes(previousHash)
         .putByte(op.code)
         .putBytes(deviceIdentity.serialise())
@@ -59,7 +88,7 @@ class MembershipEntry(
 
     internal companion object {
         val GENESIS_PREVIOUS_HASH = ByteArray(32)
-        private val LABEL = "calendite/v1/membership".encodeToByteArray()
+        private const val SUFFIX = ProtocolLabels.MEMBERSHIP
         private val EMPTY = ByteArray(0)
 
         internal fun deserialise(reader: FrameReader): MembershipEntry {
@@ -115,6 +144,166 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
     )
 
     /**
+     * The identity of every currently active member, in the order they were added.
+     *
+     * Read from the entry that added each one, which is the only place a full identity appears. It
+     * is needed by name rather than by key hex because rotating the context key means encapsulating
+     * to each remaining member's KEM key, and a hex id is not something you can encrypt to.
+     */
+    fun activeIdentities(provider: CryptoProvider): List<DeviceIdentity> {
+        val active = linkedMapOf<String, DeviceIdentity>()
+        for (entry in entries) {
+            val key = entry.deviceIdentity.signingPublicKey.toHexString()
+            when (entry.op) {
+                MembershipOp.ADD -> active[key] = entry.deviceIdentity
+                MembershipOp.REVOKE -> active.remove(key)
+            }
+        }
+        return active.values.toList()
+    }
+
+    /**
+     * Removes [removed] and rotates the context key to [newMasterKey] in a single signed entry.
+     *
+     * Rotation is not a nicety. Without it a revoke is a gesture: the person walks away still
+     * holding the key, and because the relay slot is derived from that key they can carry on
+     * reading the mailbox for as long as they care to. Rotating is what turns "they stop seeing
+     * your events" into a statement about cryptography.
+     *
+     * The new key is sealed once per remaining member, to their identity's KEM key, and the entry
+     * carries all those copies. The removed device is simply not one of the recipients, so the
+     * entry that ejects them is also the entry they cannot read.
+     */
+    fun revoke(
+        provider: CryptoProvider,
+        removed: DeviceIdentity,
+        newMasterKey: ByteArray,
+        signer: KeyPair,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): MembershipLog {
+        val removedKey = removed.signingPublicKey.toHexString()
+        val remaining = activeIdentities(provider).filterNot {
+            it.signingPublicKey.toHexString() == removedKey
+        }
+        // Only degenerate if it empties the calendar, which means revoking yourself as the sole
+        // member. Leaving yourself alone in it is allowed here: whether a one-member calendar
+        // should instead be dissolved is a product question, not one the log should decide.
+        require(remaining.isNotEmpty()) { "A revoke that empties the calendar is a dissolve" }
+        return append(
+            provider = provider,
+            op = MembershipOp.REVOKE,
+            deviceIdentity = removed,
+            wrappedKeys = WrappedKeys.wrapFor(provider, remaining, newMasterKey, namespace),
+            signer = signer,
+        )
+    }
+
+    /**
+     * Every rotated context key this log hands [device], oldest first.
+     *
+     * One per revoke entry addressed to them, so the result lines up with epochs 1, 2, 3 and so on;
+     * epoch 0 came from pairing. A device that was not a recipient of some rotation contributes
+     * nothing at that position, which is why the caller reconciles by count rather than assuming
+     * the list is complete.
+     */
+    fun rotatedKeysFor(
+        provider: CryptoProvider,
+        device: DeviceKeys,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): List<ByteArray> = entries
+        .filter { it.op == MembershipOp.REVOKE }
+        .mapNotNull { entry ->
+            entry.wrappedKeys?.let { WrappedKeys.unwrapFor(provider, it, device, namespace) }
+        }
+
+    /**
+     * The founding entry's hash, or null for an empty log.
+     *
+     * The one value in a calendar that is fixed for its whole life: entries are only ever appended,
+     * so entry zero and its hash never move. That makes it the right thing to name the calendar
+     * after, unlike the master key, which has to change whenever somebody is removed.
+     */
+    fun genesisHash(provider: CryptoProvider): ByteArray? = entries.firstOrNull()?.hash(provider)
+
+    /**
+     * How this log relates to [other].
+     *
+     * Membership changes are rare and human-initiated, so two devices appending at once is unusual
+     * but not impossible: two people removing somebody within a sync window of each other, or one
+     * adding while another removes. Refusing to reconcile leaves them permanently disagreeing about
+     * who is in the calendar, which is worse than any merge.
+     */
+    fun reconcile(other: MembershipLog): Reconciliation {
+        val shared = commonPrefixLength(other)
+        val oursAfter = entries.size - shared
+        val theirsAfter = other.entries.size - shared
+        return when {
+            // Genesis is what names a calendar. Agreeing on nothing at all does not mean the two
+            // diverged, it means they were never the same calendar, and treating that as a fork
+            // would let a stranger's log replace this one wholesale.
+            shared == 0 -> Reconciliation.Unrelated
+            oursAfter == 0 && theirsAfter == 0 -> Reconciliation.Same
+            oursAfter == 0 -> Reconciliation.TheyExtendUs
+            theirsAfter == 0 -> Reconciliation.WeExtendThem
+            else -> Reconciliation.Forked(
+                sharedPrefix = shared,
+                theirsWins = theirsWins(other, shared),
+            )
+        }
+    }
+
+    /** How many leading entries the two logs agree on, byte for byte. */
+    fun commonPrefixLength(other: MembershipLog): Int {
+        val limit = minOf(entries.size, other.entries.size)
+        var shared = 0
+        while (shared < limit &&
+            entries[shared].serialise().contentEquals(other.entries[shared].serialise())
+        ) {
+            shared++
+        }
+        return shared
+    }
+
+    /**
+     * Which side of a fork to build on: the longer branch, ties broken by the lower head hash.
+     *
+     * The rule only has to be deterministic and the same everywhere, so that two devices holding
+     * the same pair of branches choose the same winner without exchanging a word about it. Longer
+     * first because it preserves more of what people actually asked for.
+     */
+    private fun theirsWins(other: MembershipLog, shared: Int): Boolean {
+        val ours = entries.size
+        val theirs = other.entries.size
+        if (theirs != ours) return theirs > ours
+        val ourHead = entries.last().serialise().toHexString()
+        val theirHead = other.entries.last().serialise().toHexString()
+        return theirHead < ourHead
+    }
+
+    /** The entries this log has beyond the first [shared] of them. */
+    fun entriesAfter(shared: Int): List<MembershipEntry> = entries.drop(shared)
+
+    /**
+     * Whether [other] is this log with more entries added to the end.
+     *
+     * Membership has to travel: if one device adds a third person, every other device must learn
+     * about them or it will refuse their sync connection as a stranger. A hash-chained log makes
+     * that decidable without a merge algorithm, because a longer chain sharing our entire prefix
+     * can only have been built on top of what we already hold.
+     *
+     * Deliberately strict. A chain that is longer but *diverges* is a fork, which means two devices
+     * appended concurrently, and picking a winner here would silently discard somebody's change.
+     * That returns false and the caller keeps its own, so the disagreement stays visible instead of
+     * being resolved by whoever synced last.
+     */
+    fun isExtendedBy(other: MembershipLog): Boolean {
+        if (other.entries.size <= entries.size) return false
+        return entries.indices.all { index ->
+            entries[index].serialise().contentEquals(other.entries[index].serialise())
+        }
+    }
+
+    /**
      * Verifies the full chain: each entry chains to the previous hash, its signature is valid, its
      * subject identity binding is valid, and its signer was an active member *before* the entry was
      * applied (genesis self-signs). Returns the resulting active-member set, or the first failure.
@@ -130,7 +319,7 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
             if (!entry.deviceIdentity.verifyBinding(provider)) {
                 return MembershipVerification.Invalid("Invalid device-identity binding", index)
             }
-            if (!provider.ed25519Verify(entry.signerPublicKey, entry.unsignedBytes(), entry.signature)) {
+            if (!HybridSignature.verify(provider, entry.signerPublicKey, entry.unsignedBytes(), entry.signature)) {
                 return MembershipVerification.Invalid("Invalid signature", index)
             }
             val authorisationFailure = checkAuthorisation(index, entry, members)
@@ -142,9 +331,9 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
         return MembershipVerification.Valid(members.toSet())
     }
 
-    /** Finds the entry that added the device with [ed25519PublicKey], if any (to read its wrapped keys). */
-    fun addEntryFor(ed25519PublicKey: ByteArray): MembershipEntry? = entries.firstOrNull {
-        it.op == MembershipOp.ADD && it.deviceIdentity.ed25519PublicKey.contentEquals(ed25519PublicKey)
+    /** Finds the entry that added the device with [signingPublicKey], if any (to read its wrapped keys). */
+    fun addEntryFor(signingPublicKey: ByteArray): MembershipEntry? = entries.firstOrNull {
+        it.op == MembershipOp.ADD && it.deviceIdentity.signingPublicKey.contentEquals(signingPublicKey)
     }
 
     fun serialise(): ByteArray {
@@ -156,20 +345,20 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
     private fun checkAuthorisation(index: Int, entry: MembershipEntry, members: Set<String>): String? {
         if (index == 0) {
             if (entry.op != MembershipOp.ADD) return "Genesis entry must be ADD"
-            if (!entry.signerPublicKey.contentEquals(entry.deviceIdentity.ed25519PublicKey)) {
+            if (!entry.signerPublicKey.contentEquals(entry.deviceIdentity.signingPublicKey)) {
                 return "Genesis entry must self-sign the founder"
             }
             return null
         }
         if (entry.signerPublicKey.toHexString() !in members) return "Signer is not an active member"
-        if (entry.op == MembershipOp.REVOKE && entry.deviceIdentity.ed25519PublicKey.toHexString() !in members) {
+        if (entry.op == MembershipOp.REVOKE && entry.deviceIdentity.signingPublicKey.toHexString() !in members) {
             return "Revoking a non-member"
         }
         return null
     }
 
     private fun applyOp(entry: MembershipEntry, members: MutableSet<String>) {
-        val deviceKey = entry.deviceIdentity.ed25519PublicKey.toHexString()
+        val deviceKey = entry.deviceIdentity.signingPublicKey.toHexString()
         when (entry.op) {
             MembershipOp.ADD -> members.add(deviceKey)
             MembershipOp.REVOKE -> members.remove(deviceKey)
@@ -211,7 +400,7 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
                 deviceIdentity = deviceIdentity,
                 wrappedKeys = wrappedKeys,
                 signerPublicKey = signer.publicKey,
-                signature = provider.ed25519Sign(signer.privateKey, unsigned),
+                signature = HybridSignature.sign(provider, signer.privateKey, unsigned),
             )
         }
     }

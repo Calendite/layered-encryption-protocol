@@ -1,6 +1,9 @@
 package org.layeredencryption.invite
 
+import org.layeredencryption.ProtocolLabels
+import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.CryptoProvider
+import org.layeredencryption.HybridSignature
 import org.layeredencryption.KeyPair
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
@@ -28,7 +31,7 @@ class InviteBundle(
 ) {
     /** Verifies `sigA` over the §2.4 payload, binding in the recomputed [ridAsync]. */
     fun verifySignature(provider: CryptoProvider, ridAsync: ByteArray): Boolean =
-        provider.ed25519Verify(deviceIdentityA.ed25519PublicKey, signedPayload(ridAsync, expiryEpochSeconds, inviteXWingPublicKey, deviceIdentityA), signature)
+        HybridSignature.verify(provider, deviceIdentityA.signingPublicKey, signedPayload(ridAsync, expiryEpochSeconds, inviteXWingPublicKey, deviceIdentityA), signature)
 
     fun serialise(): ByteArray = FrameWriter()
         .putBytes(inviteXWingPublicKey)
@@ -38,7 +41,7 @@ class InviteBundle(
         .toByteArray()
 
     companion object {
-        private val LABEL = "calendite/v1/invite-bundle".encodeToByteArray()
+        private const val SUFFIX = ProtocolLabels.INVITE_BUNDLE
 
         /** Builds and signs a bundle for the given invite key, identity, expiry, and rendezvous id. */
         fun build(
@@ -49,7 +52,8 @@ class InviteBundle(
             ridAsync: ByteArray,
             signer: KeyPair,
         ): InviteBundle {
-            val signature = provider.ed25519Sign(
+            val signature = HybridSignature.sign(
+                provider,
                 signer.privateKey,
                 signedPayload(ridAsync, expiryEpochSeconds, inviteXWingPublicKey, deviceIdentityA),
             )
@@ -70,8 +74,9 @@ class InviteBundle(
             expiryEpochSeconds: Long,
             inviteXWingPublicKey: ByteArray,
             deviceIdentityA: DeviceIdentity,
+            namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): ByteArray = FrameWriter()
-            .putBytes(LABEL)
+            .putBytes(namespace.label(SUFFIX))
             .putBytes(ridAsync)
             .putBytes(longToBigEndian8(expiryEpochSeconds))
             .putBytes(inviteXWingPublicKey)

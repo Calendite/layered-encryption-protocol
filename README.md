@@ -16,7 +16,8 @@ means. You hand it bytes; it hands back sealed bytes, and vice versa.
                     ┌──────────────────────────────────────────┐
 your app ──bytes──▶ │  seal   ChaCha20-Poly1305 → AES-256-GCM   │ ──▶ sealed envelope
                     │  keys   X25519 + ML-KEM-768 (X-Wing)      │
-your app ◀─bytes─── │  trust  SAS pairing, signed member log    │ ◀── sealed envelope
+your app ◀─bytes─── │  sign   Ed25519 + ML-DSA-65 (both must)    │ ◀── sealed envelope
+                    │  trust  SAS pairing, signed member log    │
                     └──────────────────────────────────────────┘
 ```
 
@@ -46,9 +47,29 @@ is caught.
 an existing member, verified as a chain before any change is honoured. A compromised relay cannot
 inject "and now this device is also a member".
 
-**Signatures are Ed25519, deliberately, for now.** Signature forgery needs a *live* quantum
-computer and cannot be done retroactively from recorded traffic, so it is a materially less urgent
-threat than encryption. ML-DSA dual-signing is a tracked upgrade rather than a shipped feature.
+**Signatures are hybrid too, so nothing here is classical-only.** Every signature is Ed25519 and
+ML-DSA-65 over the same message, and **both** must verify or the signature is rejected. Note that
+this is the mirror image of the key agreement rather than more of the same. For the KEM an attacker
+must break *both* legs to read traffic; for signatures an attacker must forge *both* legs to
+impersonate a device. There is no combiner because signatures do not need one: verifying each leg
+independently and requiring both already yields the stronger of the two.
+
+Be clear about what that buys, because the two threats are easy to conflate. Breaking Ed25519 in
+2035 would not decrypt traffic recorded in 2026 — that is *harvest now, decrypt later*, and X-Wing
+already handles it. What it would allow is forging a device identity and impersonating a member
+from that point on. ML-DSA-65 closes exactly that gap. It is NIST category 3, matching ML-KEM-768,
+so neither side of the protocol is the weak one.
+
+Signatures appear only where a third party must verify something *without* holding the shared key:
+a device identity, a membership log entry, an async invite bundle, and the LAN session challenge.
+Messages are not signed. Once two devices share a key the AEAD tags already prove a message came
+from a holder of that key, symmetrically and so without a quantum weakness of their own; signing
+each one would add 3.3 KB and no assurance.
+
+The cost is size, and it is not small: identities go from about 140 bytes to 1984 + 3373, and each
+membership entry grows by 3373. Nothing in the protocol was size-constrained enough to care — the
+pairing QR carries only a short code, and frames are capped at 16 MB — but a consumer storing
+identities should expect kilobytes, not bytes.
 
 ## Using it
 
@@ -61,7 +82,7 @@ val opened = Cascade.open(provider, masterKey, sealed, aad = context)
 
 // Or use the envelope, which binds a header (calendar, lane, sequence) into the ciphertext so a
 // relay cannot re-label a message without decryption failing.
-val envelope = LaneEnvelope.seal(provider, masterKey, calendarId, lane, seq, plaintext = myBytes)
+val envelope = LaneEnvelope.seal(provider, masterKey, contextId, lane, seq, plaintext = myBytes)
 val bytes = envelope.open(provider, masterKey)   // throws on tamper; never returns unverified data
 ```
 
@@ -76,6 +97,22 @@ val result = PairingFerry.join(channel, joiner, confirmSas = { sas -> ui.askUser
 Implement `FrameChannel` over whatever you have — a socket, a WebSocket, a relay, a Bluetooth
 link. The library provides the length codec (`intToBytes` / `bytesToInt`) so your framing agrees
 with its own.
+
+## Namespacing: do this before you ship
+
+Every HKDF label and signed-transcript prefix is built from a vendor token, and the default is
+`calendite`, the application this was extracted from. Pass your own:
+
+```kotlin
+val namespace = ProtocolNamespace("mycoolapp")   // labels become mycoolapp/v1/...
+Cascade.seal(provider, key, plaintext, aad, namespace)
+```
+
+This is not cosmetic. Two applications built on this library **should** derive different keys from
+the same secret, so that a device paired for one cannot decrypt data from the other even by
+accident. The default exists only so that devices already paired in the field keep working; a test
+pins every shipped label byte for byte, because changing one character silently orphans every
+existing pairing.
 
 ## What you have to bring
 
@@ -106,6 +143,40 @@ laptop without a device or an emulator.
 
 The suite includes ML-KEM-768 known-answer tests and X-Wing vectors, plus full pairing and
 async-invite ceremonies run end to end over an in-memory channel.
+
+## Playground
+
+```
+./gradlew :playground:run          # then open http://localhost:8088
+```
+
+Two devices in one process, pairing over a **real socket** with the real ceremony, on ports 8089
+and 8090. Type a sentence, press send, and watch it become ciphertext on one device, cross a TCP
+connection, and come back out as your words on the other. Every value shown is what the library
+produced; the bytes marked in transit are the bytes that went down the socket.
+
+Tick **flip a byte in transit** to see the other half of the story: the tags fail, the message is
+rejected, and no plaintext is returned, because the cascade fails closed rather than handing back
+something half-decrypted.
+
+The playground is also the library's first consumer, which makes it a standing check on the
+public API: if using this thing is awkward, it is awkward here first.
+
+## Inspecting a ceremony
+
+`./gradlew :lep:jvmTest` runs a full pairing with a seeded generator and writes
+`lep/build/inspector/index.html`: every message, its size, the algorithms that produced it, a
+digest of each field, and what each step actually established. Open it from disk; there is no
+server, and it travels attached to a bug report.
+
+It is generated by *running the library*, so it cannot drift from the code, and the same run
+asserts what the page claims: that both sides derived the same key, that the messages appear in
+protocol order, and that no key material occurs anywhere in the output. That last check holds the
+run's real private keys and searches for them, rather than trusting that nothing leaked.
+
+Recording is a transport decorator (`RecordingChannel`), not a hook inside the ceremony, so
+instrumenting a run cannot change what it does, and the recorder structurally sees no more than a
+wiretap would. Production passes no recorder at all.
 
 ## Consuming it
 

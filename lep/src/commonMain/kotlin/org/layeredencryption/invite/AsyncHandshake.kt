@@ -1,5 +1,7 @@
 package org.layeredencryption.invite
 
+import org.layeredencryption.ProtocolLabels
+import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.CryptoProvider
 import org.layeredencryption.FrameWriter
 import org.layeredencryption.identity.DeviceIdentity
@@ -27,8 +29,8 @@ object AsyncHandshake {
     private const val SAS_ENTROPY_BYTES = 4
     private const val SAS_MODULUS = 1_000_000L
 
-    private val TRANSCRIPT_LABEL = "calendite/v1/transcript-async".encodeToByteArray()
-    private val PAIRING_SALT = "calendite/v1/pairing-async".encodeToByteArray()
+    private const val SUFFIX_TRANSCRIPT = ProtocolLabels.TRANSCRIPT_ASYNC
+    private const val SUFFIX_PAIRING = ProtocolLabels.PAIRING_ASYNC
     private val SAS_INFO = "sas".encodeToByteArray()
 
     fun transcript(
@@ -38,8 +40,9 @@ object AsyncHandshake {
         deviceIdentityA: DeviceIdentity,
         kemCiphertext: ByteArray,
         deviceIdentityS: DeviceIdentity,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
     ): ByteArray = FrameWriter()
-        .putBytes(TRANSCRIPT_LABEL)
+        .putBytes(namespace.label(SUFFIX_TRANSCRIPT))
         .putBytes(ridAsync)
         .putBytes(longToBigEndian8(expiryEpochSeconds))
         .putBytes(inviteXWingPublicKey)
@@ -49,12 +52,34 @@ object AsyncHandshake {
         .toByteArray()
 
     /** `K_async = HKDF(ss ‖ dh1, "calendite/v1/pairing-async", transcript, 32)`. */
-    fun asyncKey(provider: CryptoProvider, sharedSecret: ByteArray, dh1: ByteArray, transcript: ByteArray): ByteArray =
-        provider.hkdfSha256(ikm = sharedSecret + dh1, salt = PAIRING_SALT, info = transcript, length = KEY_SIZE)
+    fun asyncKey(
+        provider: CryptoProvider,
+        sharedSecret: ByteArray,
+        dh1: ByteArray,
+        transcript: ByteArray,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): ByteArray =
+        provider.hkdfSha256(
+            ikm = sharedSecret + dh1,
+            salt = namespace.label(SUFFIX_PAIRING),
+            info = transcript,
+            length = KEY_SIZE,
+        )
 
     /** `SAS = uint32BE(HKDF(ss ‖ dh1, salt, transcript ‖ "sas", 4)) mod 10⁶`, 6 digits grouped 3-3 (§2.6). */
-    fun shortAuthString(provider: CryptoProvider, sharedSecret: ByteArray, dh1: ByteArray, transcript: ByteArray): String {
-        val out = provider.hkdfSha256(ikm = sharedSecret + dh1, salt = PAIRING_SALT, info = transcript + SAS_INFO, length = SAS_ENTROPY_BYTES)
+    fun shortAuthString(
+        provider: CryptoProvider,
+        sharedSecret: ByteArray,
+        dh1: ByteArray,
+        transcript: ByteArray,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): String {
+        val out = provider.hkdfSha256(
+            ikm = sharedSecret + dh1,
+            salt = namespace.label(SUFFIX_PAIRING),
+            info = transcript + SAS_INFO,
+            length = SAS_ENTROPY_BYTES,
+        )
         val value = ((out[0].toLong() and 0xFF) shl 24) or
             ((out[1].toLong() and 0xFF) shl 16) or
             ((out[2].toLong() and 0xFF) shl 8) or

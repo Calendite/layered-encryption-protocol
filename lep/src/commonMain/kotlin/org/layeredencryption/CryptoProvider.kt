@@ -1,7 +1,7 @@
 package org.layeredencryption
 
 /**
- * Raw cryptographic primitives for Calendar Sharing, sourced per platform (docs/Protocol.md §5).
+ * Raw cryptographic primitives for the protocol, sourced per platform (docs/Protocol.md §5).
  *
  * This interface is deliberately a set of *thin primitives* — no protocol logic lives here. The
  * higher-level constructions that Calendite actually owns (the [Cascade] and the [XWing] combiner)
@@ -88,6 +88,20 @@ interface CryptoProvider {
 
     /** Ed25519 verification. Returns `true` iff [signature] is valid for [message] under [publicKey]. */
     fun ed25519Verify(publicKey: ByteArray, message: ByteArray, signature: ByteArray): Boolean
+
+    /**
+     * Generates an ML-DSA-65 (FIPS 204) signing keypair — the post-quantum leg of [HybridSignature].
+     *
+     * ML-DSA-65 is NIST category 3, matching ML-KEM-768 on the agreement side, so neither half of
+     * the protocol is the weak one.
+     */
+    fun mlDsa65GenerateKeyPair(): KeyPair
+
+    /** ML-DSA-65 signature over [message]; returns the 3309-byte signature. */
+    fun mlDsa65Sign(privateKey: ByteArray, message: ByteArray): ByteArray
+
+    /** ML-DSA-65 verification. Returns `true` iff [signature] is valid for [message] under [publicKey]. */
+    fun mlDsa65Verify(publicKey: ByteArray, message: ByteArray, signature: ByteArray): Boolean
 }
 
 /** A raw asymmetric keypair. Encodings are provider-specific but round-trip within one provider. */

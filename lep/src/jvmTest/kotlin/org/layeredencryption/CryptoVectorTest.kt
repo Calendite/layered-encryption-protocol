@@ -142,7 +142,7 @@ class CryptoVectorTest {
     fun cascade_roundTrips() {
         val master = provider.randomBytes(32)
         val plaintext = "Dentist, Tue 14:00, hidden from Sarah".encodeToByteArray()
-        val aad = "calendar-42".encodeToByteArray()
+        val aad = "context-42".encodeToByteArray()
 
         val blob = Cascade.seal(provider, master, plaintext, aad)
         assertContentEquals(plaintext, Cascade.open(provider, master, blob, aad))

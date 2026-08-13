@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 }
 
 include(":lep")
+include(":playground")

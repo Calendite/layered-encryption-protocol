@@ -29,8 +29,8 @@ object Cascade {
      * spelling) pre-ship; wire constant — frozen, never respell. They MUST be byte-identical across
      * every platform implementation for domain separation.
      */
-    private val LABEL_CHACHA = "calendite/v1/layer-chacha".encodeToByteArray()
-    private val LABEL_AES = "calendite/v1/layer-aes".encodeToByteArray()
+    private const val SUFFIX_CHACHA = ProtocolLabels.LAYER_CHACHA
+    private const val SUFFIX_AES = ProtocolLabels.LAYER_AES
 
     /**
      * Encrypts [plaintext] under the [masterKey]. The returned blob is `n1 ‖ n2 ‖ ciphertext`,
@@ -41,8 +41,9 @@ object Cascade {
         masterKey: ByteArray,
         plaintext: ByteArray,
         aad: ByteArray = EMPTY,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
     ): ByteArray {
-        val (chachaKey, aesKey) = deriveLayerKeys(provider, masterKey)
+        val (chachaKey, aesKey) = deriveLayerKeys(provider, masterKey, namespace)
         val innerNonce = provider.randomBytes(NONCE_SIZE)
         val outerNonce = provider.randomBytes(NONCE_SIZE)
 
@@ -61,11 +62,12 @@ object Cascade {
         masterKey: ByteArray,
         blob: ByteArray,
         aad: ByteArray = EMPTY,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
     ): ByteArray {
         if (blob.size < NONCE_SIZE * 2) {
             throw CryptoException("Cascade blob too short: ${blob.size} bytes")
         }
-        val (chachaKey, aesKey) = deriveLayerKeys(provider, masterKey)
+        val (chachaKey, aesKey) = deriveLayerKeys(provider, masterKey, namespace)
         val innerNonce = blob.copyOfRange(0, NONCE_SIZE)
         val outerNonce = blob.copyOfRange(NONCE_SIZE, NONCE_SIZE * 2)
         val outerCiphertext = blob.copyOfRange(NONCE_SIZE * 2, blob.size)
@@ -74,9 +76,13 @@ object Cascade {
         return provider.chaCha20Poly1305Open(chachaKey, innerNonce, inner, aad)
     }
 
-    private fun deriveLayerKeys(provider: CryptoProvider, masterKey: ByteArray): Pair<ByteArray, ByteArray> {
-        val chachaKey = provider.hkdfSha256(masterKey, salt = null, info = LABEL_CHACHA, length = KEY_SIZE)
-        val aesKey = provider.hkdfSha256(masterKey, salt = null, info = LABEL_AES, length = KEY_SIZE)
+    private fun deriveLayerKeys(
+        provider: CryptoProvider,
+        masterKey: ByteArray,
+        namespace: ProtocolNamespace,
+    ): Pair<ByteArray, ByteArray> {
+        val chachaKey = provider.hkdfSha256(masterKey, salt = null, info = namespace.label(SUFFIX_CHACHA), length = KEY_SIZE)
+        val aesKey = provider.hkdfSha256(masterKey, salt = null, info = namespace.label(SUFFIX_AES), length = KEY_SIZE)
         return chachaKey to aesKey
     }
 

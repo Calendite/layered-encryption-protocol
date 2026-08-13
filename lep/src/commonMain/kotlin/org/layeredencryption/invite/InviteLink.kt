@@ -42,7 +42,7 @@ class InviteLink(val secret: ByteArray, val fingerprint: ByteArray) {
 
         /** The 16-byte fingerprint of an identity: `SHA-256(ed25519_pk)[0..16]`. */
         fun fingerprintOf(provider: CryptoProvider, identity: DeviceIdentity): ByteArray =
-            provider.sha256(identity.ed25519PublicKey).copyOfRange(0, FINGERPRINT_SIZE)
+            provider.sha256(identity.signingPublicKey).copyOfRange(0, FINGERPRINT_SIZE)
 
         /** Strictly parses a fragment payload (`A1.<secret>.<fp>`), or returns `null` if malformed. */
         fun parse(fragment: String): InviteLink? {

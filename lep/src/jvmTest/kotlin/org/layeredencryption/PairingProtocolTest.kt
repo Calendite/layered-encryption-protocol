@@ -28,39 +28,68 @@ class PairingProtocolTest {
     // ── PairingCode (§6.1/§6.2) ───────────────────────────────────────────────────────────────
 
     @Test
-    fun pairingCode_generatesSixCharsAndFormats() {
+    fun pairingCode_generates24CharsAndFormats() {
         val code = PairingCode.generate(provider)
-        assertEquals(6, code.display.length)
-        assertEquals(7, code.formatted.length) // 6 chars + 1 hyphen
-        assertEquals('-', code.formatted[3])
+        assertEquals(24, code.display.length)
+        assertEquals(29, code.formatted.length) // 24 chars + 5 hyphens
+        assertEquals('-', code.formatted[4])
+        assertEquals(listOf(14, 14), code.lines.map { it.length }, "two lines of three 4-char groups")
+        assertEquals(code.display, code.lines.joinToString("").replace("-", ""))
+    }
+
+    /**
+     * `O` must never be generated. Drawing from 36 symbols and folding `O` to `0` afterwards would
+     * make `0` twice as likely as everything else, which quietly costs about six bits of
+     * min-entropy against a guesser who starts with the most probable codes.
+     */
+    @Test
+    fun pairingCode_isUniformOverThirtyFiveSymbols() {
+        val counts = HashMap<Char, Int>()
+        val samples = 2_000
+        repeat(samples) { PairingCode.generate(provider).canonical.forEach { counts[it] = (counts[it] ?: 0) + 1 } }
+
+        assertEquals(35, counts.size, "every canonical symbol should appear")
+        assertTrue('O' !in counts, "O must never be generated; it is only forgiven on input")
+
+        val total = samples * PairingCode.LENGTH
+        val expected = total / 35.0
+        val zero = counts['0']!!.toDouble()
+        assertTrue(
+            zero in (expected * 0.85)..(expected * 1.15),
+            "0 appeared $zero times against an expected $expected: the draw is not uniform",
+        )
     }
 
     @Test
     fun pairingCode_foldsOnlyTheZeroOhPair() {
         // O↔0 is the single forgiven confusable, and separators are ignored.
-        assertEquals(PairingCode.canonicalise("OK2-M5X"), PairingCode.canonicalise("0k2 m5x"))
-        assertEquals("0K2M5X", PairingCode.canonicalise("OK2-M5X"))
+        val withOh = "OK2M-5XAB-CDEF-GHJK-LMNP-QRST"
+        val withZero = "0k2m 5xab cdef ghjk lmnp qrst"
+        assertEquals(PairingCode.canonicalise(withOh), PairingCode.canonicalise(withZero))
+        assertEquals("0K2M5XABCDEFGHJKLMNPQRST", PairingCode.canonicalise(withOh))
     }
 
     @Test
     fun pairingCode_keepsOneEyeAndElDistinct() {
         // Colour-coded uppercase Atkinson Mono disambiguates these on screen, so they stay distinct
         // characters — folding them would throw away entropy for no legibility gain.
-        val one = PairingCode.canonicalise("1AAAAA")
-        val eye = PairingCode.canonicalise("IAAAAA")
-        val el = PairingCode.canonicalise("LAAAAA")
+        val rest = "A".repeat(23)
+        val one = PairingCode.canonicalise("1$rest")
+        val eye = PairingCode.canonicalise("I$rest")
+        val el = PairingCode.canonicalise("L$rest")
 
-        assertEquals("1AAAAA", one)
-        assertEquals("IAAAAA", eye)
-        assertEquals("LAAAAA", el)
+        assertEquals("1$rest", one)
+        assertEquals("I$rest", eye)
+        assertEquals("L$rest", el)
         assertEquals(3, setOf(one, eye, el).size, "1, I and L must not collapse together")
     }
 
     @Test
     fun pairingCode_rejectsWrongLength() {
         assertNull(PairingCode.canonicalise("ABC"))
-        assertNull(PairingCode.canonicalise("ABCDEFG"))
-        assertEquals("ABCDEF", PairingCode.canonicalise("abc-def"))
+        assertNull(PairingCode.canonicalise("A".repeat(23)))
+        assertNull(PairingCode.canonicalise("A".repeat(25)))
+        assertEquals("A".repeat(24), PairingCode.canonicalise("aaaa-aaaa-aaaa-aaaa-aaaa-aaaa"))
     }
 
     // ── Rendezvous (§6.3) ─────────────────────────────────────────────────────────────────────
@@ -77,14 +106,20 @@ class PairingProtocolTest {
 
     @Test
     fun sas_isSixDigitsGroupedAndDeterministic() {
-        val transcript = PairingTranscript(byteArrayOf(1), byteArrayOf(2), byteArrayOf(3), byteArrayOf(4))
+        val transcript = PairingTranscript(byteArrayOf(1), byteArrayOf(2), byteArrayOf(3), byteArrayOf(4), byteArrayOf(5))
         val secret = ByteArray(32) { it.toByte() }
-        val sas = Handshake.shortAuthString(provider, secret, transcript)
+        val nonce = ByteArray(Handshake.SAS_NONCE_SIZE) { it.toByte() }
+        val sas = Handshake.shortAuthString(provider, secret, transcript, nonce)
 
         assertEquals(7, sas.length) // "ddd ddd"
         assertEquals(' ', sas[3])
         assertTrue(sas.filter { it != ' ' }.all { it.isDigit() })
-        assertEquals(sas, Handshake.shortAuthString(provider, secret, transcript))
+        assertEquals(sas, Handshake.shortAuthString(provider, secret, transcript, nonce))
+
+        // A different nonce means different digits: this is what makes the SAS unpredictable to a
+        // joiner that has not yet seen the opening.
+        val otherNonce = ByteArray(Handshake.SAS_NONCE_SIZE) { (it + 1).toByte() }
+        assertTrue(sas != Handshake.shortAuthString(provider, secret, transcript, otherNonce))
     }
 
     // ── MembershipLog (§4.7) ──────────────────────────────────────────────────────────────────
@@ -155,8 +190,8 @@ class PairingProtocolTest {
 
     @Test
     fun pairing_wrongCodeFailsAtTheMac() {
-        val inviter = Inviter(provider, DeviceKeys.generate(provider), PairingCode.of("ABCDEF"))
-        val joiner = Joiner(provider, DeviceKeys.generate(provider), PairingCode.of("ZZZZZZ"))
+        val inviter = Inviter(provider, DeviceKeys.generate(provider), PairingCode.of("A".repeat(24)))
+        val joiner = Joiner(provider, DeviceKeys.generate(provider), PairingCode.of("Z".repeat(24)))
 
         val response = joiner.onInviterHello(inviter.hello())
         // The joiner never knew the real code: its MAC cannot match, so pairing aborts.

@@ -6,7 +6,7 @@ import org.layeredencryption.toHexString
  * The durable summary of a pending async invite (Async_Invites_Spec.md §4.2).
  *
  * These are the bytes needed to *resume* an invite after the inviting app is killed while the
- * partner sleeps: the secret, the invite X-Wing keypair, the calendar master key to release, the
+ * partner sleeps: the secret, the invite X-Wing keypair, the context master key to release, the
  * expiry, and the current state. The live claimed-context (`K_async`, transcript) is deliberately
  * **not** here — durable resume of an in-flight claim is a Phase 2 concern.
  */

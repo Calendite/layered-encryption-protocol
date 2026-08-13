@@ -10,6 +10,12 @@ import org.bouncycastle.crypto.params.HKDFParameters
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
+import org.bouncycastle.pqc.crypto.mldsa.MLDSAKeyGenerationParameters
+import org.bouncycastle.pqc.crypto.mldsa.MLDSAKeyPairGenerator
+import org.bouncycastle.pqc.crypto.mldsa.MLDSAParameters
+import org.bouncycastle.pqc.crypto.mldsa.MLDSAPrivateKeyParameters
+import org.bouncycastle.pqc.crypto.mldsa.MLDSAPublicKeyParameters
+import org.bouncycastle.pqc.crypto.mldsa.MLDSASigner
 import org.bouncycastle.pqc.crypto.mlkem.MLKEMExtractor
 import org.bouncycastle.pqc.crypto.mlkem.MLKEMGenerator
 import org.bouncycastle.pqc.crypto.mlkem.MLKEMKeyGenerationParameters
@@ -36,9 +42,17 @@ import javax.crypto.spec.SecretKeySpec
  *   there is no interaction with Android's own repackaged BouncyCastle. ML-KEM is the once-per-
  *   pairing KEM, not a hot path (§4.1).
  */
-class BouncyCastleCryptoProvider : CryptoProvider {
-
-    private val secureRandom = SecureRandom()
+class BouncyCastleCryptoProvider(
+    /**
+     * The single source of randomness: key generation and nonces both draw from it.
+     *
+     * Injectable **only** so a recorded ceremony can be reproduced byte for byte from a seed,
+     * which is what makes test vectors and the inspector possible. Production must never pass
+     * anything here; the default is the platform CSPRNG, and a seeded generator would make every
+     * key in the system predictable.
+     */
+    private val secureRandom: SecureRandom = SecureRandom(),
+) : CryptoProvider {
 
     override fun randomBytes(size: Int): ByteArray = ByteArray(size).also(secureRandom::nextBytes)
 
@@ -127,6 +141,36 @@ class BouncyCastleCryptoProvider : CryptoProvider {
         verifier.update(message, 0, message.size)
         return verifier.verifySignature(signature)
     }
+
+    override fun mlDsa65GenerateKeyPair(): KeyPair {
+        val generator = MLDSAKeyPairGenerator()
+        generator.init(MLDSAKeyGenerationParameters(secureRandom, MLDSAParameters.ml_dsa_65))
+        val pair = generator.generateKeyPair()
+        return KeyPair(
+            publicKey = (pair.public as MLDSAPublicKeyParameters).encoded,
+            privateKey = (pair.private as MLDSAPrivateKeyParameters).encoded,
+        )
+    }
+
+    override fun mlDsa65Sign(privateKey: ByteArray, message: ByteArray): ByteArray {
+        val signer = MLDSASigner()
+        signer.init(true, MLDSAPrivateKeyParameters(MLDSAParameters.ml_dsa_65, privateKey))
+        signer.update(message, 0, message.size)
+        return signer.generateSignature()
+    }
+
+    /**
+     * Rejects rather than throws on a malformed key or signature: Bouncy Castle raises on a
+     * wrong-length key, and a caller verifying an attacker-supplied identity must see that as an
+     * ordinary "no" rather than a crash.
+     */
+    override fun mlDsa65Verify(publicKey: ByteArray, message: ByteArray, signature: ByteArray): Boolean =
+        runCatching {
+            val verifier = MLDSASigner()
+            verifier.init(false, MLDSAPublicKeyParameters(MLDSAParameters.ml_dsa_65, publicKey))
+            verifier.update(message, 0, message.size)
+            verifier.verifySignature(signature)
+        }.getOrDefault(false)
 
     private fun aeadSeal(
         transformation: String,

@@ -1,5 +1,7 @@
 package org.layeredencryption.invite
 
+import org.layeredencryption.ProtocolLabels
+import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.CryptoProvider
 
 /**
@@ -14,7 +16,11 @@ import org.layeredencryption.CryptoProvider
  */
 object AsyncRendezvous {
 
-    private val LABEL = "calendite/rendezvous-async/v1".encodeToByteArray()
+    private const val SUFFIX = ProtocolLabels.RENDEZVOUS_ASYNC
 
-    fun id(provider: CryptoProvider, secret: ByteArray): ByteArray = provider.sha256(LABEL + secret)
+    fun id(
+        provider: CryptoProvider,
+        secret: ByteArray,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): ByteArray = provider.sha256(namespace.label(SUFFIX) + secret)
 }

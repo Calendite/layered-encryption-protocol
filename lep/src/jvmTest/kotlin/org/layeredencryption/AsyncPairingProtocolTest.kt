@@ -154,8 +154,9 @@ class AsyncPairingProtocolTest {
         val response = joiner().onBundle(inviter.link, inviter.bundle, now)
         val real = response.deviceIdentityS
         val tamperedIdentity = DeviceIdentity(
-            real.ed25519PublicKey,
+            real.signingPublicKey,
             real.x25519IdentityPublicKey,
+            real.xWingPublicKey,
             real.bindingSignature.copyOf().also { it[0] = (it[0] + 1).toByte() },
         )
         val response2 = AsyncJoinerResponse(response.kemCiphertext, tamperedIdentity, response.joinerMac)

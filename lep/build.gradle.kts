@@ -39,6 +39,15 @@ kotlin {
         // agreement, Ed25519. Shared by the Android and JVM targets so the suite can run without
         // a device.
         jvmCommonMain.dependencies { implementation(libs.bouncycastle.provider) }
+        // The browser provider binds the noble libraries: pure-JS, synchronous (the CryptoProvider
+        // interface is synchronous, which rules out Promise-only WebCrypto), one maintainer,
+        // hashes/ciphers/curves independently audited. See CryptoProvider.wasmJs.kt.
+        wasmJsMain.dependencies {
+            implementation(npm("@noble/hashes", "2.3.0"))
+            implementation(npm("@noble/ciphers", "2.3.0"))
+            implementation(npm("@noble/curves", "2.3.0"))
+            implementation(npm("@noble/post-quantum", "0.7.0"))
+        }
         val jvmTest by getting {
             dependencies {
                 implementation(kotlin("test"))

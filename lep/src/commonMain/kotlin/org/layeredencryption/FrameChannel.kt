@@ -2,7 +2,7 @@ package org.layeredencryption
 
 /**
  * A bidirectional, ordered channel of length-delimited byte frames — the abstraction every LAN
- * session speaks over (Calendar_Sharing.md §7.2).
+ * session speaks over (docs/Protocol.md).
  *
  * The TCP implementation lives per platform (Ktor raw sockets); tests use an in-memory pipe. All
  * protocol logic is written against this interface, so the ceremony and sync code are byte-identical
@@ -24,7 +24,7 @@ interface FrameChannel {
 
     companion object {
         /**
-         * Upper bound on a single frame. Generous enough for an initial full-calendar ops exchange
+         * Upper bound on a single frame. Generous enough for an initial full-context ops exchange
          * (envelopes are ~kilobytes each), small enough that garbage on the port cannot ask us to
          * allocate unbounded memory.
          */

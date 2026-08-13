@@ -26,7 +26,7 @@ import org.layeredencryption.FrameChannel
 object PairingFerry {
 
     /**
-     * Runs the inviting side over an accepted [channel]. Returns the calendar master key once the
+     * Runs the inviting side over an accepted [channel]. Returns the context master key once the
      * ceremony completes. [confirmSas] shows the 6-digit SAS to this device's human.
      */
     suspend fun runInviter(
@@ -51,7 +51,7 @@ object PairingFerry {
     }
 
     /**
-     * Runs the joining side over a connected [channel]. Returns the recovered calendar master key.
+     * Runs the joining side over a connected [channel]. Returns the recovered context master key.
      */
     suspend fun runJoiner(
         channel: FrameChannel,
