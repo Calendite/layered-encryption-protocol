@@ -1,6 +1,7 @@
 package org.layeredencryption.membership
 
 import org.layeredencryption.ProtocolLabels
+import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.CryptoProvider
 import org.layeredencryption.HybridSignature
@@ -56,34 +57,45 @@ sealed interface Reconciliation {
  * wrapped for a newly-added device.
  */
 class MembershipEntry(
-    val previousHash: ByteArray,
+    previousHash: ByteArray,
     val op: MembershipOp,
     val deviceIdentity: DeviceIdentity,
-    val wrappedKeys: ByteArray?,
-    val signerPublicKey: ByteArray,
-    val signature: ByteArray,
+    wrappedKeys: ByteArray?,
+    signerPublicKey: ByteArray,
+    signature: ByteArray,
 ) {
+    // Copied both ways: a verified entry cannot be mutated by whoever built or read it.
+    private val _previousHash = previousHash.copyOf()
+    private val _wrappedKeys = wrappedKeys?.copyOf()
+    private val _signerPublicKey = signerPublicKey.copyOf()
+    private val _signature = signature.copyOf()
+
+    val previousHash: ByteArray get() = _previousHash.copyOf()
+    val wrappedKeys: ByteArray? get() = _wrappedKeys?.copyOf()
+    val signerPublicKey: ByteArray get() = _signerPublicKey.copyOf()
+    val signature: ByteArray get() = _signature.copyOf()
+
     /** The signed-over bytes (everything except the signature itself). */
     internal fun unsignedBytes(namespace: ProtocolNamespace = ProtocolNamespace.Default): ByteArray = FrameWriter()
         .putBytes(namespace.label(SUFFIX))
-        .putBytes(previousHash)
+        .putBytes(_previousHash)
         .putByte(op.code)
         .putBytes(deviceIdentity.serialise())
-        .putBytes(wrappedKeys ?: EMPTY)
-        .putBytes(signerPublicKey)
+        .putBytes(_wrappedKeys ?: EMPTY)
+        .putBytes(_signerPublicKey)
         .toByteArray()
 
     /** This entry's hash, which the next entry chains to via its `previousHash`. */
-    internal fun hash(provider: CryptoProvider): ByteArray = provider.sha256(unsignedBytes() + signature)
+    internal fun hash(provider: CryptoProvider): ByteArray = provider.sha256(unsignedBytes() + _signature)
 
     internal fun serialise(): ByteArray = FrameWriter()
-        .putBytes(previousHash)
+        .putBytes(_previousHash)
         .putByte(op.code)
         .putBytes(deviceIdentity.serialise())
-        .putBytes(wrappedKeys ?: EMPTY)
-        .putByte(if (wrappedKeys == null) 0 else 1)
-        .putBytes(signerPublicKey)
-        .putBytes(signature)
+        .putBytes(_wrappedKeys ?: EMPTY)
+        .putByte(if (_wrappedKeys == null) 0 else 1)
+        .putBytes(_signerPublicKey)
+        .putBytes(_signature)
         .toByteArray()
 
     internal companion object {
@@ -95,8 +107,8 @@ class MembershipEntry(
             val previousHash = reader.readBytes()
             require(previousHash.size == GENESIS_PREVIOUS_HASH.size) { "previousHash must be a SHA-256 hash" }
             val op = MembershipOp.fromCode(reader.readByte())
-            val deviceIdentity = DeviceIdentity.deserialise(reader.readBytes())
-            val wrappedBytes = reader.readBytes()
+            val deviceIdentity = DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.SERIALISED_SIZE))
+            val wrappedBytes = reader.readBytes(ProtocolLimits.MAX_WRAPPED_KEYS_BYTES)
             val wrappedFlag = reader.readByte()
             // A canonical flag, strictly: any other byte, or absent-but-nonempty, would let two
             // different serialisations parse to the same logical entry and desynchronise the
@@ -392,6 +404,9 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
         private const val MAX_ENTRIES = 10_000
 
         fun deserialise(data: ByteArray): MembershipLog {
+            require(data.size <= ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES) {
+                "Membership log of ${data.size} bytes exceeds the ${ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES}-byte limit"
+            }
             val reader = FrameReader(data)
             val entries = mutableListOf<MembershipEntry>()
             while (reader.hasRemaining()) {

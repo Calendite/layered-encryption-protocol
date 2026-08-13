@@ -25,20 +25,27 @@ import org.layeredencryption.longToBigEndian8
  * pre-published-bundle mechanism, rejecting its directory trust model.
  */
 class InviteBundle(
-    val inviteXWingPublicKey: ByteArray,
+    inviteXWingPublicKey: ByteArray,
     val deviceIdentityA: DeviceIdentity,
     val expiryEpochSeconds: Long,
-    val signature: ByteArray,
+    signature: ByteArray,
 ) {
+    // Copied both ways: a bundle that passed its signature check cannot be mutated afterwards.
+    private val _inviteXWingPublicKey = inviteXWingPublicKey.copyOf()
+    private val _signature = signature.copyOf()
+
+    val inviteXWingPublicKey: ByteArray get() = _inviteXWingPublicKey.copyOf()
+    val signature: ByteArray get() = _signature.copyOf()
+
     /** Verifies `sigA` over the §2.4 payload, binding in the recomputed [ridAsync]. */
     fun verifySignature(provider: CryptoProvider, ridAsync: ByteArray): Boolean =
-        HybridSignature.verify(provider, deviceIdentityA.signingPublicKey, signedPayload(ridAsync, expiryEpochSeconds, inviteXWingPublicKey, deviceIdentityA), signature)
+        HybridSignature.verify(provider, deviceIdentityA.signingPublicKey, signedPayload(ridAsync, expiryEpochSeconds, _inviteXWingPublicKey, deviceIdentityA), _signature)
 
     fun serialise(): ByteArray = FrameWriter()
-        .putBytes(inviteXWingPublicKey)
+        .putBytes(_inviteXWingPublicKey)
         .putBytes(deviceIdentityA.serialise())
         .putBytes(longToBigEndian8(expiryEpochSeconds))
-        .putBytes(signature)
+        .putBytes(_signature)
         .toByteArray()
 
     companion object {
@@ -61,8 +68,18 @@ class InviteBundle(
             return InviteBundle(inviteXWingPublicKey, deviceIdentityA, expiryEpochSeconds, signature)
         }
 
-        /** Strict: exact field sizes and full consumption; anything else is [IllegalArgumentException]. */
+        private const val LENGTH_PREFIX = 4
+
+        /** The one legal serialised size: four length-prefixed fixed-width fields. */
+        internal const val SERIALISED_SIZE =
+            LENGTH_PREFIX + XWing.PUBLIC_KEY_SIZE +
+                LENGTH_PREFIX + DeviceIdentity.SERIALISED_SIZE +
+                LENGTH_PREFIX + 8 +
+                LENGTH_PREFIX + HybridSignature.SIGNATURE_SIZE
+
+        /** Strict: exact total and field sizes, full consumption; anything else is [IllegalArgumentException]. */
         fun deserialise(bytes: ByteArray): InviteBundle {
+            require(bytes.size == SERIALISED_SIZE) { "An invite bundle is exactly $SERIALISED_SIZE bytes, was ${bytes.size}" }
             val reader = FrameReader(bytes)
             val inviteXWingPublicKey = reader.readBytes()
             require(inviteXWingPublicKey.size == XWing.PUBLIC_KEY_SIZE) { "Invite KEM key has wrong size" }

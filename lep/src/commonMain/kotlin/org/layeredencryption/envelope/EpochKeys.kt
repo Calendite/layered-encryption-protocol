@@ -2,6 +2,7 @@ package org.layeredencryption.envelope
 
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
+import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.intToBytes
 import org.layeredencryption.bytesToInt
 
@@ -21,30 +22,34 @@ import org.layeredencryption.bytesToInt
  * nothing to stop a caller sealing under a key that has since been retired, which would produce
  * envelopes nobody can read and no error to say so.
  */
-class EpochKeys private constructor(private val byEpoch: Map<Int, ByteArray>) {
+class EpochKeys private constructor(byEpoch: Map<Int, ByteArray>) {
+
+    // Keys are copied in and copied out: a caller mutating what it passed or what it read
+    // cannot corrupt the held set.
+    private val byEpoch: Map<Int, ByteArray> = byEpoch.mapValues { it.value.copyOf() }
 
     init {
-        require(byEpoch.isNotEmpty()) { "A context has at least one key" }
-        require(byEpoch.keys.all { it >= 0 }) { "Epochs count up from zero" }
+        require(this.byEpoch.isNotEmpty()) { "A context has at least one key" }
+        require(this.byEpoch.keys.all { it >= 0 }) { "Epochs count up from zero" }
     }
 
     /** The newest epoch, which is the one to seal under. */
-    val current: Int = byEpoch.keys.max()
+    val current: Int = this.byEpoch.keys.max()
 
-    /** The key for [current]. */
-    val currentKey: ByteArray get() = byEpoch.getValue(current)
+    /** The key for [current], as a defensive copy. */
+    val currentKey: ByteArray get() = byEpoch.getValue(current).copyOf()
 
     /** Every epoch held, ascending. */
     val epochs: List<Int> get() = byEpoch.keys.sorted()
 
     /**
-     * The key for [epoch], or null if this device does not hold it.
+     * The key for [epoch] (a defensive copy), or null if this device does not hold it.
      *
      * Null is a legitimate answer, not a fault: a device added after a rotation never receives the
      * keys from before it, so envelopes from those epochs are not readable here and never will be.
      * Callers should treat that as "not for me" rather than as corruption.
      */
-    operator fun get(epoch: Int): ByteArray? = byEpoch[epoch]
+    operator fun get(epoch: Int): ByteArray? = byEpoch[epoch]?.copyOf()
 
     /** This set plus [key] at the next epoch. Used when a rotation happens. */
     fun withNextEpoch(key: ByteArray): EpochKeys = EpochKeys(byEpoch + (current + 1 to key))
@@ -79,6 +84,9 @@ class EpochKeys private constructor(private val byEpoch: Map<Int, ByteArray>) {
          * earlier key.
          */
         fun deserialise(bytes: ByteArray): EpochKeys? = runCatching {
+            require(bytes.size <= ProtocolLimits.MAX_EPOCH_KEYS_BYTES) {
+                "EpochKeys blob of ${bytes.size} bytes exceeds the ${ProtocolLimits.MAX_EPOCH_KEYS_BYTES}-byte limit"
+            }
             val reader = FrameReader(bytes)
             val byEpoch = mutableMapOf<Int, ByteArray>()
             var previousEpoch = -1

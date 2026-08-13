@@ -26,10 +26,19 @@ import kotlin.io.encoding.ExperimentalEncodingApi
  * The whole payload lives in the URL **fragment**, so it never reaches any web server (design §6.4).
  * Parsing is strict: exact tag, exact field count, exact decoded lengths — anything else is rejected.
  */
-class InviteLink(val secret: ByteArray, val fingerprint: ByteArray) {
+class InviteLink(secret: ByteArray, fingerprint: ByteArray) {
+
+    // Copied both ways: the link is the *application's* handle on the secret, deliberately not an
+    // alias of the live inviter's array — mutating a link cannot corrupt an active invite, and an
+    // invite scrubbing itself does not reach into links the app already rendered.
+    private val _secret = secret.copyOf()
+    private val _fingerprint = fingerprint.copyOf()
+
+    val secret: ByteArray get() = _secret.copyOf()
+    val fingerprint: ByteArray get() = _fingerprint.copyOf()
 
     /** The `A2.<secret>.<fp>` fragment payload (without the URL prefix). */
-    fun fragment(): String = "$TAG.${b64(secret)}.${b64(fingerprint)}"
+    fun fragment(): String = "$TAG.${b64(_secret)}.${b64(_fingerprint)}"
 
     /** The full shareable URL. */
     fun url(): String = "$URL_PREFIX${fragment()}"

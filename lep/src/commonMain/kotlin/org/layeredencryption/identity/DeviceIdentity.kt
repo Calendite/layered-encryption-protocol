@@ -47,39 +47,62 @@ import org.layeredencryption.FrameWriter
  * the wire or into the log.
  */
 class DeviceIdentity(
-    val signingPublicKey: ByteArray,
-    val x25519IdentityPublicKey: ByteArray,
-    /** Others encapsulate to this to hand this device a secret, such as a rotated context key. */
-    val xWingPublicKey: ByteArray,
-    val bindingSignature: ByteArray,
+    signingPublicKey: ByteArray,
+    x25519IdentityPublicKey: ByteArray,
+    xWingPublicKey: ByteArray,
+    bindingSignature: ByteArray,
 ) {
+    // Copied on construction and on every read: an identity that has been verified cannot be
+    // mutated afterwards, by the code that built it or the code that read it (LEP-09 retest 9.3).
+    private val _signingPublicKey = signingPublicKey.copyOf()
+    private val _x25519IdentityPublicKey = x25519IdentityPublicKey.copyOf()
+    private val _xWingPublicKey = xWingPublicKey.copyOf()
+    private val _bindingSignature = bindingSignature.copyOf()
+
+    val signingPublicKey: ByteArray get() = _signingPublicKey.copyOf()
+    val x25519IdentityPublicKey: ByteArray get() = _x25519IdentityPublicKey.copyOf()
+
+    /** Others encapsulate to this to hand this device a secret, such as a rotated context key. */
+    val xWingPublicKey: ByteArray get() = _xWingPublicKey.copyOf()
+    val bindingSignature: ByteArray get() = _bindingSignature.copyOf()
+
     /** Canonical, length-framed serialisation — the exact bytes that appear on the wire and in logs. */
     fun serialise(): ByteArray = FrameWriter()
-        .putBytes(signingPublicKey)
-        .putBytes(x25519IdentityPublicKey)
-        .putBytes(xWingPublicKey)
-        .putBytes(bindingSignature)
+        .putBytes(_signingPublicKey)
+        .putBytes(_x25519IdentityPublicKey)
+        .putBytes(_xWingPublicKey)
+        .putBytes(_bindingSignature)
         .toByteArray()
 
     /** Verifies the X25519↔signing-key binding, requiring both signature legs to pass. */
     fun verifyBinding(provider: CryptoProvider, namespace: ProtocolNamespace = ProtocolNamespace.Default): Boolean =
         HybridSignature.verify(
             provider,
-            signingPublicKey,
-            bindingMessage(signingPublicKey, x25519IdentityPublicKey, xWingPublicKey, namespace),
-            bindingSignature,
+            _signingPublicKey,
+            bindingMessage(_signingPublicKey, _x25519IdentityPublicKey, _xWingPublicKey, namespace),
+            _bindingSignature,
         )
 
     companion object {
         private const val BINDING_SUFFIX = ProtocolLabels.DEVICE_IDENTITY
 
         private const val X25519_KEY_SIZE = 32
+        private const val LENGTH_PREFIX = 4
+
+        /** The one legal serialised size: four length-prefixed fixed-width fields. */
+        internal const val SERIALISED_SIZE =
+            LENGTH_PREFIX + HybridSignature.PUBLIC_KEY_SIZE +
+                LENGTH_PREFIX + X25519_KEY_SIZE +
+                LENGTH_PREFIX + XWing.PUBLIC_KEY_SIZE +
+                LENGTH_PREFIX + HybridSignature.SIGNATURE_SIZE
 
         /**
          * Strict: every field has exactly one legal length (the format has no variability at
-         * all — see the class doc's byte layout), and the frame must be fully consumed.
+         * all — see the class doc's byte layout), so the total is checked first, before any
+         * copies, and the frame must be fully consumed.
          */
         fun deserialise(bytes: ByteArray): DeviceIdentity {
+            require(bytes.size == SERIALISED_SIZE) { "A device identity is exactly $SERIALISED_SIZE bytes, was ${bytes.size}" }
             val reader = FrameReader(bytes)
             val identity = deserialise(reader)
             reader.expectEnd()
@@ -119,13 +142,23 @@ class DeviceIdentity(
  */
 class DeviceKeys(
     val identity: DeviceIdentity,
-    val signingPrivateKey: ByteArray,
-    val x25519IdentityPrivateKey: ByteArray,
-    /** Opens what others encapsulate to [DeviceIdentity.xWingPublicKey]. */
-    val xWingPrivateKey: ByteArray,
+    signingPrivateKey: ByteArray,
+    x25519IdentityPrivateKey: ByteArray,
+    xWingPrivateKey: ByteArray,
 ) {
+    // Copied both ways, like the identity: callers get snapshots, never the live key arrays.
+    private val _signingPrivateKey = signingPrivateKey.copyOf()
+    private val _x25519IdentityPrivateKey = x25519IdentityPrivateKey.copyOf()
+    private val _xWingPrivateKey = xWingPrivateKey.copyOf()
+
+    val signingPrivateKey: ByteArray get() = _signingPrivateKey.copyOf()
+    val x25519IdentityPrivateKey: ByteArray get() = _x25519IdentityPrivateKey.copyOf()
+
+    /** Opens what others encapsulate to [DeviceIdentity.xWingPublicKey]. */
+    val xWingPrivateKey: ByteArray get() = _xWingPrivateKey.copyOf()
+
     /** The hybrid signing keypair, in the [KeyPair] shape the membership log expects. */
-    val signingKeyPair: KeyPair get() = KeyPair(identity.signingPublicKey, signingPrivateKey)
+    val signingKeyPair: KeyPair get() = KeyPair(identity.signingPublicKey, _signingPrivateKey.copyOf())
 
     companion object {
         /** Generates a fresh device identity: hybrid signing + X25519 keypairs bound by a signature. */

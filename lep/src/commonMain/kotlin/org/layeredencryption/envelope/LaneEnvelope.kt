@@ -5,6 +5,7 @@ import org.layeredencryption.CryptoException
 import org.layeredencryption.CryptoProvider
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
+import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.decodeUtf8Strict
 
@@ -31,15 +32,20 @@ class LaneEnvelope(
     val lane: String,
     val seq: Int,
     val epoch: Int,
-    val ciphertext: ByteArray,
+    ciphertext: ByteArray,
 ) {
+    private val _ciphertext = ciphertext.copyOf()
+
+    /** A defensive copy; the envelope's own bytes cannot be mutated after construction. */
+    val ciphertext: ByteArray get() = _ciphertext.copyOf()
+
     fun serialise(): ByteArray = FrameWriter()
         .putBytes(version.toString().encodeToByteArray())
         .putBytes(contextId.encodeToByteArray())
         .putBytes(lane.encodeToByteArray())
         .putBytes(seq.toString().encodeToByteArray())
         .putBytes(epoch.toString().encodeToByteArray())
-        .putBytes(ciphertext)
+        .putBytes(_ciphertext)
         .toByteArray()
 
     /** The header bytes bound as AEAD associated data — re-labelling an op breaks decryption. */
@@ -65,6 +71,9 @@ class LaneEnvelope(
          * fully consumed. Every failure is an [IllegalArgumentException].
          */
         fun deserialise(bytes: ByteArray): LaneEnvelope {
+            require(bytes.size <= ProtocolLimits.MAX_ENVELOPE_BYTES) {
+                "Envelope of ${bytes.size} bytes exceeds the ${ProtocolLimits.MAX_ENVELOPE_BYTES}-byte limit"
+            }
             val reader = FrameReader(bytes)
             val version = canonicalNonNegativeInt(reader.readBytes())
             require(version == VERSION) { "Unsupported envelope version $version" }
@@ -136,6 +145,6 @@ class LaneEnvelope(
         val key = keys[epoch] ?: throw CryptoException(
             "No key for epoch $epoch: this device was added after that rotation",
         )
-        return Cascade.open(provider, key, ciphertext, aad = associatedData(), namespace = namespace)
+        return Cascade.open(provider, key, _ciphertext, aad = associatedData(), namespace = namespace)
     }
 }

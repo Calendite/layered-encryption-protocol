@@ -96,11 +96,11 @@ class AsyncInviteLifecycleTest {
 
         val joiner = joiner()
         inviter.onResponse(joiner.onBundle(inviter.link, inviter.bundle, now), now)
-        assertEquals(AsyncInviteState.CLAIMED, store.all().single().state)
+        assertTrue(store.all().isEmpty(), "a claim burns the durable record — claims are non-resumable")
 
         val delivery = inviter.approve()
         assertTrue(store.all().isEmpty(), "an approved invite must leave no stored record")
-        assertTrue(inviter.link.secret.all { it == 0.toByte() }, "the link secret must be zeroed")
+        assertTrue(inviter.isScrubbed(), "the invite-scoped secrets must be zeroed")
 
         // The master key survives the scrub on both sides — it is the deliverable.
         joiner.onDelivery(delivery)
@@ -116,7 +116,7 @@ class AsyncInviteLifecycleTest {
         inviter.reject()
         assertEquals(AsyncInviteState.REJECTED, inviter.state)
         assertTrue(store.all().isEmpty(), "a rejected invite must leave no stored record")
-        assertTrue(inviter.link.secret.all { it == 0.toByte() }, "the link secret must be zeroed")
+        assertTrue(inviter.isScrubbed(), "the invite-scoped secrets must be zeroed")
     }
 
     @Test
@@ -128,7 +128,7 @@ class AsyncInviteLifecycleTest {
         assertEquals(ResponseOutcome.Expired, inviter.onResponse(response, expiry + 1))
         assertEquals(AsyncInviteState.EXPIRED, inviter.state)
         assertTrue(store.all().isEmpty(), "an expired invite must leave no stored record")
-        assertTrue(inviter.link.secret.all { it == 0.toByte() }, "the link secret must be zeroed")
+        assertTrue(inviter.isScrubbed(), "the invite-scoped secrets must be zeroed")
     }
 
     @Test

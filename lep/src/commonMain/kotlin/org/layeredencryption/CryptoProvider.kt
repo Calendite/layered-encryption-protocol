@@ -125,10 +125,18 @@ interface CryptoProvider {
     fun mlDsa65Verify(publicKey: ByteArray, message: ByteArray, signature: ByteArray): Boolean
 }
 
-/** A raw asymmetric keypair. Encodings are provider-specific but round-trip within one provider. */
+/**
+ * A raw asymmetric keypair. Encodings are provider-specific but round-trip within one provider.
+ *
+ * Deliberately a thin **mutable** carrier, unlike the protocol objects (which copy their arrays
+ * both ways): every provider call allocates these on the hot path, their arrays are freshly
+ * allocated and never shared on creation, and in-place mutability is what lets a holder zero its
+ * own key material (the async invite scrubs its KEM seed this way). Protocol objects that accept
+ * one copy out of it; do not hand the same [KeyPair] to two owners.
+ */
 class KeyPair(val publicKey: ByteArray, val privateKey: ByteArray)
 
-/** The output of a KEM encapsulation: the ciphertext to send, and the shared secret to keep. */
+/** The output of a KEM encapsulation: the ciphertext to send, and the shared secret to keep. Same mutable-carrier contract as [KeyPair]. */
 class KemEncapsulation(val ciphertext: ByteArray, val sharedSecret: ByteArray)
 
 /**

@@ -15,27 +15,40 @@ import org.layeredencryption.toHexString
 class PairingException(message: String) : Exception(message)
 
 // ── Wire messages (transport-agnostic; §6.3 steps 1–6) ────────────────────────────────────────
+//
+// Every message copies its byte arrays on construction: what the state machines verify is the
+// message's own snapshot, which the producer of the arrays cannot mutate afterwards.
 
 /** Step 1: inviter → joiner. The ephemeral X-Wing public key + inviter device identity. */
 class InviterHello(
-    val xWingPublicKey: ByteArray,
+    xWingPublicKey: ByteArray,
     val inviterDeviceIdentity: DeviceIdentity,
+    sasCommitment: ByteArray,
+) {
+    val xWingPublicKey: ByteArray = xWingPublicKey.copyOf()
+
     /** Binds the inviter to a SAS nonce before it can see the joiner's ciphertext. */
-    val sasCommitment: ByteArray,
-)
+    val sasCommitment: ByteArray = sasCommitment.copyOf()
+}
 
 /** Step 2/4: joiner → inviter. The KEM ciphertext, joiner device identity, and the joiner's MAC. */
-class JoinerResponse(val kemCiphertext: ByteArray, val joinerDeviceIdentity: DeviceIdentity, val joinerMac: ByteArray)
+class JoinerResponse(kemCiphertext: ByteArray, val joinerDeviceIdentity: DeviceIdentity, joinerMac: ByteArray) {
+    val kemCiphertext: ByteArray = kemCiphertext.copyOf()
+    val joinerMac: ByteArray = joinerMac.copyOf()
+}
 
 /** Step 4: inviter → joiner. The inviter's MAC, proving the inviter also knows the code. */
-class InviterConfirm(
-    val inviterMac: ByteArray,
+class InviterConfirm(inviterMac: ByteArray, sasNonce: ByteArray) {
+    val inviterMac: ByteArray = inviterMac.copyOf()
+
     /** Opens the commitment from the hello; only now can the joiner compute the SAS. */
-    val sasNonce: ByteArray,
-)
+    val sasNonce: ByteArray = sasNonce.copyOf()
+}
 
 /** Step 6: inviter → joiner. The membership log carrying the master key wrapped under K_handshake. */
-class InviterComplete(val membershipLog: ByteArray)
+class InviterComplete(membershipLog: ByteArray) {
+    val membershipLog: ByteArray = membershipLog.copyOf()
+}
 
 /**
  * A calendar that already exists, for inviting a second or third person into it.

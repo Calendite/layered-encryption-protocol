@@ -25,16 +25,25 @@ enum class AsyncInviteState { PENDING, CLAIMED, APPROVED, REJECTED, EXPIRED }
  * Posted by the joiner S at `rid_async`; gated on link possession twice: [linkProofMac] is the
  * cheap pre-authentication gate the inviter checks before any expensive cryptography, and
  * [joinerMac] binds the full handshake once the key agreement has run.
+ *
+ * Arrays are copied on construction: what the inviter verifies is this message's own snapshot.
  */
 class AsyncJoinerResponse(
-    val kemCiphertext: ByteArray,
+    kemCiphertext: ByteArray,
     val deviceIdentityS: DeviceIdentity,
-    val linkProofMac: ByteArray,
-    val joinerMac: ByteArray,
-)
+    linkProofMac: ByteArray,
+    joinerMac: ByteArray,
+) {
+    val kemCiphertext: ByteArray = kemCiphertext.copyOf()
+    val linkProofMac: ByteArray = linkProofMac.copyOf()
+    val joinerMac: ByteArray = joinerMac.copyOf()
+}
 
 /** Emitted by the inviter A **only** from `approve()`: the master key inside a signed membership log. */
-class AsyncDelivery(val inviterMac: ByteArray, val serialisedMembershipLog: ByteArray)
+class AsyncDelivery(inviterMac: ByteArray, serialisedMembershipLog: ByteArray) {
+    val inviterMac: ByteArray = inviterMac.copyOf()
+    val serialisedMembershipLog: ByteArray = serialisedMembershipLog.copyOf()
+}
 
 /** The outcome of feeding a response to [AsyncInviter.onResponse]. */
 sealed interface ResponseOutcome {
@@ -89,9 +98,13 @@ class AsyncInviter private constructor(
      * it. Invalid responses are dropped without state change; later valid ones report [ResponseOutcome.AlreadyClaimed].
      *
      * Never throws for peer-supplied input — every malformed or hostile response maps to a
-     * [ResponseOutcome]. What this cannot do from inside the library: bound how *often*
-     * it is called. The transport in front of it should rate-limit each rendezvous and cap
-     * concurrent responses, even though a failed response is now cheap.
+     * [ResponseOutcome]. A *local storage fault* is different: if burning the durable record at
+     * claim time throws, that exception propagates with the invite unchanged (still `PENDING`
+     * and claimable), because a store being down is not a verdict about the peer.
+     *
+     * What this cannot do from inside the library: bound how *often* it is called. The transport
+     * in front of it should rate-limit each rendezvous and cap concurrent responses, even though
+     * a failed response is cheap.
      */
     fun onResponse(response: AsyncJoinerResponse, nowEpochSeconds: Long): ResponseOutcome =
         claimLock.withLock { handleResponse(response, nowEpochSeconds) }
@@ -124,8 +137,11 @@ class AsyncInviter private constructor(
             null
         } ?: return ResponseOutcome.Invalid
 
-        claim = evaluated.claim
+        // The transition burns the durable record before anything is published (non-resumable
+        // claims). If the store throws, nothing has changed — no claim, still PENDING — and the
+        // storage fault propagates to the caller, which is a different thing than a peer verdict.
         transitionTo(AsyncInviteState.CLAIMED)
+        claim = evaluated.claim
         return ResponseOutcome.Claimed(evaluated.shortAuthString, evaluated.joinerFingerprint)
     }
 
@@ -191,30 +207,65 @@ class AsyncInviter private constructor(
     }
 
     /**
+     * True when a terminal transition could not remove the durable record. The invite itself is
+     * already dead — its state is terminal and its secrets are scrubbed — but the store still
+     * holds a stale `PENDING` record. Retry via [retryStoreCleanup]. A record that survives
+     * repeated retries is what the rollback-protection requirements on [InviteStore] exist for.
+     */
+    var requiresStoreCleanup: Boolean = false
+        private set
+
+    /** Retries the durable-record removal that a failed terminal transition left behind. */
+    fun retryStoreCleanup(): Unit = claimLock.withLock {
+        if (requiresStoreCleanup) {
+            store?.remove(ridAsync.toHexString())
+            requiresStoreCleanup = false
+        }
+    }
+
+    /**
      * The single place state changes, always under [claimLock] and validated against
      * [ALLOWED_TRANSITIONS] — an impossible step is a protocol bug and throws.
      *
-     * A terminal transition removes the invite from the store instead of writing it back —
-     * `APPROVED`, `REJECTED`, and `EXPIRED` invites hold nothing worth resuming — and zeroes the
-     * link secret, invite KEM private key, and claimed session key on a best effort, so neither
-     * the store, the aliased [InviteLink.secret], nor a later heap dump keeps a live copy. The
-     * master key is deliberately kept; see [masterKey].
+     * The storage failure model (LEP-07 retest, issue 7.2): stores can throw, so each transition
+     * is ordered to fail safe.
+     *
+     * - `PENDING → CLAIMED` removes the durable record *before* publishing anything: claims are
+     *   non-resumable, so the record is burned first, and a store failure propagates with the
+     *   invite unchanged — still fully `PENDING`, durable, and claimable.
+     * - Terminal transitions publish the state first, then scrub the link secret, invite KEM
+     *   seed, and claimed session key **unconditionally** (in a `finally`). A store failure
+     *   cannot resurrect the invite or lose an [approve] delivery: it is recorded in
+     *   [requiresStoreCleanup] instead of thrown. The master key is deliberately kept; see
+     *   [masterKey].
      */
     private fun transitionTo(next: AsyncInviteState) {
         if (next !in ALLOWED_TRANSITIONS.getValue(state)) {
             throw PairingException("Illegal invite transition: $state → $next")
         }
+        if (next == AsyncInviteState.CLAIMED) {
+            store?.remove(ridAsync.toHexString()) // may throw: nothing has been published yet
+            state = next
+            return
+        }
         state = next
-        if (next in TERMINAL_STATES) {
+        try {
             store?.remove(ridAsync.toHexString())
+        } catch (e: Exception) {
+            requiresStoreCleanup = true
+        } finally {
             secret.fill(0)
             inviteXWing.privateKey.fill(0)
             claim?.asyncKey?.fill(0)
             claim = null
-        } else {
-            store?.put(toPending())
         }
     }
+
+    /** Test probe: whether the invite-scoped secrets are zeroed and the claim dropped. */
+    internal fun isScrubbed(): Boolean =
+        claim == null &&
+            secret.all { it == 0.toByte() } &&
+            inviteXWing.privateKey.all { it == 0.toByte() }
 
     private fun toPending() = PendingInvite(
         ridAsync = ridAsync,
@@ -272,7 +323,40 @@ class AsyncInviter private constructor(
             AsyncInviteState.EXPIRED to emptySet(),
         )
 
-        private val TERMINAL_STATES = setOf(AsyncInviteState.APPROVED, AsyncInviteState.REJECTED, AsyncInviteState.EXPIRED)
+        /**
+         * Restores a `PENDING` invite from its durable record — the other half of the
+         * non-resumable-claim policy (LEP-07 retest, issue 7.3): `PENDING` is the *only* state
+         * the store ever holds, and this is the only way back in. The bundle is re-signed rather
+         * than stored; any valid signature over the same fields verifies, and the link's
+         * fingerprint pins the identity, which is unchanged.
+         *
+         * An expired record is not restored: it is removed from the store and reported, so a
+         * dead invite cannot be resurrected by replaying an old snapshot.
+         */
+        fun resume(
+            provider: CryptoProvider,
+            device: DeviceKeys,
+            pending: PendingInvite,
+            nowEpochSeconds: Long,
+            store: InviteStore? = null,
+        ): AsyncInviter {
+            if (pending.state != AsyncInviteState.PENDING) {
+                throw PairingException("Only PENDING invites are resumable, was ${pending.state}")
+            }
+            if (nowEpochSeconds > pending.expiryEpochSeconds) {
+                store?.remove(pending.ridAsyncHex)
+                throw PairingException("Invite expired while stored")
+            }
+            val bundle = InviteBundle.build(
+                provider, pending.inviteXWingPublicKey, device.identity, pending.expiryEpochSeconds, pending.ridAsync, device.signingKeyPair,
+            )
+            val link = InviteLink.create(provider, pending.secret, device.identity)
+            return AsyncInviter(
+                provider, device, pending.secret, pending.ridAsync,
+                KeyPair(publicKey = pending.inviteXWingPublicKey, privateKey = pending.inviteXWingPrivateKey),
+                pending.masterKey, bundle, link, pending.expiryEpochSeconds, store,
+            )
+        }
     }
 }
 

@@ -51,11 +51,18 @@ class FrameReader(private val data: ByteArray) {
         return data[position++].toInt() and 0xFF
     }
 
-    fun readBytes(): ByteArray {
+    fun readBytes(): ByteArray = readBytes(Int.MAX_VALUE)
+
+    /**
+     * [readBytes] with a protocol-imposed ceiling, checked **before** the copy is made — an
+     * oversize field costs the caller nothing but the length read.
+     */
+    fun readBytes(maxLength: Int): ByteArray {
         require(data.size - position >= 4) { "Frame underflow reading length" }
         val length = bytesToInt(data, position)
         position += 4
         require(length >= 0) { "Negative frame length $length" }
+        require(length <= maxLength) { "Frame field of $length bytes exceeds the $maxLength-byte limit" }
         require(length <= data.size - position) { "Frame underflow reading $length bytes" }
         return data.copyOfRange(position, position + length).also { position += length }
     }

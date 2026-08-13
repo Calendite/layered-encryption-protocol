@@ -4,9 +4,12 @@ import org.layeredencryption.Cascade
 import org.layeredencryption.CryptoProvider
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
+import org.layeredencryption.HybridSignature
 import org.layeredencryption.ProtocolLabels
+import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.XWing
+import org.layeredencryption.decodeUtf8Strict
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.identity.DeviceKeys
 import org.layeredencryption.toHexString
@@ -54,6 +57,8 @@ object WrappedKeys {
         secret: ByteArray,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
     ): ByteArray {
+        val ids = recipients.map { it.signingPublicKey.toHexString() }
+        require(ids.toSet().size == ids.size) { "Duplicate recipient in wrap list" }
         val writer = FrameWriter()
         for (recipient in recipients) {
             val encapsulation = XWing.encapsulate(provider, recipient.xWingPublicKey)
@@ -78,38 +83,49 @@ object WrappedKeys {
         device: DeviceKeys,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
     ): ByteArray? = runCatching {
+        val copies = parse(blob)
         val own = device.identity.signingPublicKey.toHexString()
-        val reader = FrameReader(blob)
-        var copies = 0
-        while (reader.hasRemaining()) {
-            require(++copies <= MAX_RECIPIENTS) { "More than $MAX_RECIPIENTS wrapped copies" }
-            val memberId = reader.readBytes().decodeToString()
-            val kemCiphertext = reader.readBytes()
-            val sealed = reader.readBytes()
-            if (memberId != own) continue
+        val mine = copies.firstOrNull { it.memberId == own } ?: return@runCatching null
 
-            require(kemCiphertext.size == XWing.CIPHERTEXT_SIZE) { "Wrapped-copy KEM ciphertext has wrong size" }
-            val sharedSecret = XWing.decapsulate(provider, device.xWingPrivateKey, kemCiphertext)
-            val wrapKey = wrapKey(provider, sharedSecret, namespace)
-            return@runCatching Cascade.open(
-                provider, wrapKey, sealed, aad = device.identity.serialise(), namespace = namespace,
-            )
-        }
-        null
+        val sharedSecret = XWing.decapsulate(provider, device.xWingPrivateKey, mine.kemCiphertext)
+        val wrapKey = wrapKey(provider, sharedSecret, namespace)
+        Cascade.open(provider, wrapKey, mine.sealed, aad = device.identity.serialise(), namespace = namespace)
     }.getOrNull()
 
     /** Which members a blob carries a copy for, without opening any of them. */
-    fun recipientsOf(blob: ByteArray): List<String> = runCatching {
-        val recipients = mutableListOf<String>()
+    fun recipientsOf(blob: ByteArray): List<String> =
+        runCatching { parse(blob).map { it.memberId } }.getOrDefault(emptyList())
+
+    private class Copy(val memberId: String, val kemCiphertext: ByteArray, val sealed: ByteArray)
+
+    /**
+     * Parses and validates the **complete** blob before anything is decrypted: strict
+     * lowercase-hex identifiers of the exact signing-key length, unique recipients, an exact KEM
+     * ciphertext size for every copy (not only the caller's), and bounded sealed payloads. A
+     * duplicate or malformed copy *after* the caller's own therefore fails the whole blob — a
+     * currently-authorised malicious member cannot sign a non-canonical structure that different
+     * consumers would read differently.
+     */
+    private fun parse(blob: ByteArray): List<Copy> {
         val reader = FrameReader(blob)
+        val copies = mutableListOf<Copy>()
+        val seen = mutableSetOf<String>()
         while (reader.hasRemaining()) {
-            require(recipients.size < MAX_RECIPIENTS) { "More than $MAX_RECIPIENTS wrapped copies" }
-            recipients += reader.readBytes().decodeToString()
-            reader.readBytes()
-            reader.readBytes()
+            require(copies.size < MAX_RECIPIENTS) { "More than $MAX_RECIPIENTS wrapped copies" }
+            val memberId = reader.readBytes(MEMBER_ID_HEX_LENGTH).decodeUtf8Strict()
+            require(memberId.length == MEMBER_ID_HEX_LENGTH) { "Member id must be $MEMBER_ID_HEX_LENGTH characters" }
+            require(memberId.all { it in '0'..'9' || it in 'a'..'f' }) { "Member id must be lowercase hex" }
+            require(seen.add(memberId)) { "Duplicate wrapped-copy recipient" }
+            val kemCiphertext = reader.readBytes(XWing.CIPHERTEXT_SIZE)
+            require(kemCiphertext.size == XWing.CIPHERTEXT_SIZE) { "Wrapped-copy KEM ciphertext has wrong size" }
+            val sealed = reader.readBytes(ProtocolLimits.MAX_WRAPPED_SEALED_BYTES)
+            copies += Copy(memberId, kemCiphertext, sealed)
         }
-        recipients.toList()
-    }.getOrDefault(emptyList())
+        return copies
+    }
+
+    /** The signing public key as lowercase hex: 2 characters per byte. */
+    private const val MEMBER_ID_HEX_LENGTH = HybridSignature.PUBLIC_KEY_SIZE * 2
 
     /** Far beyond any real member list; bounds what hostile framing can make these loops build. */
     private const val MAX_RECIPIENTS = 4_096
