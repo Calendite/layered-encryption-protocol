@@ -53,6 +53,25 @@ class CryptoProviderConformanceTest {
         )
     }
 
+    /** FIPS 202 SHAKE256 known answers, plus the XOF prefix property the seed expansion relies on. */
+    @Test
+    fun shake256_knownAnswersAndXofPrefix() {
+        val provider = provider ?: return
+        assertContentEquals(
+            hex("46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f"),
+            provider.shake256(ByteArray(0), 32),
+        )
+        assertContentEquals(
+            hex("483366601360a8771c6863080cc4114d8db44530f8f1e1ee4f94ea37e78b5739"),
+            provider.shake256("abc".encodeToByteArray(), 32),
+        )
+        // An XOF's longer read starts with its shorter read — X-Wing's 96-byte expansion depends on it.
+        assertContentEquals(
+            provider.shake256("abc".encodeToByteArray(), 32),
+            provider.shake256("abc".encodeToByteArray(), 96).copyOfRange(0, 32),
+        )
+    }
+
     /** RFC 4231 Test Case 1 (HMAC-SHA256). */
     @Test
     fun hmacSha256_rfc4231Case1() {
@@ -164,6 +183,16 @@ class CryptoProviderConformanceTest {
         )
     }
 
+    /** RFC 7748 §6.1: the public key for Alice's scalar, derived directly (X-Wing seed expansion path). */
+    @Test
+    fun x25519PublicKey_rfc7748Vector() {
+        val provider = provider ?: return
+        assertContentEquals(
+            hex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"),
+            provider.x25519PublicKey(hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")),
+        )
+    }
+
     @Test
     fun x25519_agreementIsSymmetric() {
         val provider = provider ?: return
@@ -224,6 +253,34 @@ class CryptoProviderConformanceTest {
 
         val recovered = provider.mlKem768Decapsulate(keyPair.privateKey, encapsulation.ciphertext)
         assertContentEquals(encapsulation.sharedSecret, recovered)
+    }
+
+    /**
+     * FIPS 203 `KeyGen_internal(d, z)`: deterministic, and *identical across providers* — the
+     * pinned hash below was produced independently by Bouncy Castle 1.81 and noble post-quantum
+     * from the same seed, so any provider that disagrees here breaks X-Wing interop.
+     */
+    @Test
+    fun mlKem768_seededKeygenIsDeterministicAcrossProviders() {
+        val provider = provider ?: return
+        val d = ByteArray(32) { it.toByte() }
+        val z = ByteArray(32) { (32 + it).toByte() }
+
+        val first = provider.mlKem768KeyPairFromSeed(d, z)
+        val second = provider.mlKem768KeyPairFromSeed(d, z)
+        assertContentEquals(first.publicKey, second.publicKey, "seeded keygen must be deterministic")
+        assertContentEquals(
+            hex("0b7934c83125c788995e2ba6bd761e33046b3e40571be53e023309a29f398cc9"),
+            provider.sha256(first.publicKey),
+            "seeded keygen public key must match the cross-provider golden value",
+        )
+
+        // The seeded keypair must be usable end to end.
+        val encapsulation = provider.mlKem768Encapsulate(first.publicKey)
+        assertContentEquals(
+            encapsulation.sharedSecret,
+            provider.mlKem768Decapsulate(first.privateKey, encapsulation.ciphertext),
+        )
     }
 
     /** FIPS 203 implicit rejection: a tampered ciphertext yields a *different* secret, not a crash. */

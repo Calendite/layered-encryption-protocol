@@ -12,8 +12,10 @@ import kotlin.test.assertTrue
  * cascade / X-Wing constructions (docs/Protocol.md §5.4).
  *
  * These pin the primitives to published vectors (RFC 8439, RFC 5869, FIPS 202 SHA3) and prove the
- * asymmetric round-trips and the cascade's fail-closed behaviour. Full ACVP ML-KEM-768 vectors and
- * the IETF X-Wing *key-encoding* vectors remain as CI work per the pre-launch checklist (§5.5).
+ * asymmetric round-trips and the cascade's fail-closed behaviour. The IETF X-Wing vectors —
+ * key generation, encapsulation, and decapsulation — live in `XWingKatTest` (all platforms) and
+ * `XWingDerandTest` (JVM). Full ACVP ML-KEM-768 vectors remain as CI work per the pre-launch
+ * checklist (§5.5).
  */
 class CryptoVectorTest {
 

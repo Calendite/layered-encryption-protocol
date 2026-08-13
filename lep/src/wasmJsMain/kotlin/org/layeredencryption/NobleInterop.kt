@@ -31,7 +31,11 @@ internal external object NobleSha2Refs {
 @JsModule("@noble/hashes/sha3.js")
 internal external object NobleSha3 {
     fun sha3_256(data: Uint8Array): Uint8Array
+    fun shake256(data: Uint8Array, options: JsAny): Uint8Array
 }
+
+/** The `{ dkLen: n }` options bag noble's XOF hashes take for a custom output length. */
+internal fun xofOptions(dkLen: Int): JsAny = js("({ dkLen: dkLen })")
 
 @JsModule("@noble/hashes/hmac.js")
 internal external object NobleHmac {
@@ -95,6 +99,8 @@ internal external interface NobleEncapsulation {
 
 internal external interface NobleMlKem {
     fun keygen(): NobleKeys
+    /** Deterministic FIPS 203 keygen; [seed] is the 64-byte `d ‖ z`. */
+    fun keygen(seed: Uint8Array): NobleKeys
     fun encapsulate(publicKey: Uint8Array): NobleEncapsulation
     fun decapsulate(cipherText: Uint8Array, secretKey: Uint8Array): Uint8Array
 }

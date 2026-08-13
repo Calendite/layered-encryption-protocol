@@ -137,7 +137,7 @@ class AsyncInviter private constructor(
 
         val sharedSecret = XWing.decapsulate(provider, inviteXWing.privateKey, response.kemCiphertext)
         val dh1 = AsyncHandshake.contributoryDh(
-            provider, XWing.x25519SecretComponent(inviteXWing.privateKey), response.deviceIdentityS.x25519IdentityPublicKey,
+            provider, XWing.x25519SecretComponent(provider, inviteXWing.privateKey), response.deviceIdentityS.x25519IdentityPublicKey,
         )
         val transcript = AsyncHandshake.transcript(
             ridAsync, expiryEpochSeconds, inviteXWing.publicKey, device.identity, response.kemCiphertext, response.deviceIdentityS,

@@ -38,6 +38,9 @@ internal class NobleCryptoProvider : CryptoProvider {
     override fun sha3_256(data: ByteArray): ByteArray =
         NobleSha3.sha3_256(data.toUint8Array()).toByteArray()
 
+    override fun shake256(data: ByteArray, outputLength: Int): ByteArray =
+        NobleSha3.shake256(data.toUint8Array(), xofOptions(outputLength)).toByteArray()
+
     override fun sha256(data: ByteArray): ByteArray =
         NobleSha2.sha256(data.toUint8Array()).toByteArray()
 
@@ -82,8 +85,17 @@ internal class NobleCryptoProvider : CryptoProvider {
     override fun x25519(privateKey: ByteArray, peerPublicKey: ByteArray): ByteArray =
         NobleCurves.x25519.getSharedSecret(privateKey.toUint8Array(), peerPublicKey.toUint8Array()).toByteArray()
 
+    override fun x25519PublicKey(privateKey: ByteArray): ByteArray =
+        NobleCurves.x25519.getPublicKey(privateKey.toUint8Array()).toByteArray()
+
     override fun mlKem768GenerateKeyPair(): KeyPair {
         val keys = NoblePqKem.ml_kem768.keygen()
+        return KeyPair(publicKey = keys.publicKey.toByteArray(), privateKey = keys.secretKey.toByteArray())
+    }
+
+    override fun mlKem768KeyPairFromSeed(d: ByteArray, z: ByteArray): KeyPair {
+        require(d.size == 32 && z.size == 32) { "ML-KEM keygen seeds d and z must be 32 bytes each" }
+        val keys = NoblePqKem.ml_kem768.keygen((d + z).toUint8Array())
         return KeyPair(publicKey = keys.publicKey.toByteArray(), privateKey = keys.secretKey.toByteArray())
     }
 

@@ -33,6 +33,13 @@ interface CryptoProvider {
     /** SHA3-256. Used by the X-Wing combiner (§4.3); a fixed-size 32-byte digest. */
     fun sha3_256(data: ByteArray): ByteArray
 
+    /**
+     * SHAKE256 (FIPS 202) extendable-output function, read to [outputLength] bytes.
+     * Used by X-Wing's `expandDecapsulationKey` to expand the 32-byte seed into the ML-KEM and
+     * X25519 components (draft-connolly-cfrg-xwing-kem-10 §5.2).
+     */
+    fun shake256(data: ByteArray, outputLength: Int): ByteArray
+
     /** SHA-256. Used for rendezvous ids and membership-log hash chaining (§6.3, §4.7). */
     fun sha256(data: ByteArray): ByteArray
 
@@ -71,8 +78,22 @@ interface CryptoProvider {
     /** X25519 Diffie-Hellman: returns the raw 32-byte shared secret for our private + peer public key. */
     fun x25519(privateKey: ByteArray, peerPublicKey: ByteArray): ByteArray
 
+    /**
+     * The X25519 public key for a given 32-byte scalar — scalar multiplication by the base point.
+     * Needed where the private scalar comes out of a KDF rather than out of [x25519GenerateKeyPair]
+     * (X-Wing seed expansion).
+     */
+    fun x25519PublicKey(privateKey: ByteArray): ByteArray
+
     /** Generates an ML-KEM-768 (FIPS 203) keypair. Public = encapsulation key; private = decapsulation key. */
     fun mlKem768GenerateKeyPair(): KeyPair
+
+    /**
+     * Deterministic ML-KEM-768 key generation from the FIPS 203 seeds — `KeyGen_internal(d, z)`,
+     * both 32 bytes. Used by X-Wing seed expansion, where the same 32-byte X-Wing seed must
+     * reproduce the same keypair on every call and every platform.
+     */
+    fun mlKem768KeyPairFromSeed(d: ByteArray, z: ByteArray): KeyPair
 
     /** ML-KEM-768 encapsulation against a peer's public (encapsulation) key. */
     fun mlKem768Encapsulate(peerPublicKey: ByteArray): KemEncapsulation

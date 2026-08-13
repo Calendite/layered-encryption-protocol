@@ -3,6 +3,7 @@ package org.layeredencryption
 import org.bouncycastle.crypto.agreement.X25519Agreement
 import org.bouncycastle.crypto.digests.SHA3Digest
 import org.bouncycastle.crypto.digests.SHA256Digest
+import org.bouncycastle.crypto.digests.SHAKEDigest
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
@@ -62,6 +63,12 @@ class BouncyCastleCryptoProvider(
         return ByteArray(digest.digestSize).also { digest.doFinal(it, 0) }
     }
 
+    override fun shake256(data: ByteArray, outputLength: Int): ByteArray {
+        val digest = SHAKEDigest(256)
+        digest.update(data, 0, data.size)
+        return ByteArray(outputLength).also { digest.doFinal(it, 0, outputLength) }
+    }
+
     override fun sha256(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(data)
 
     override fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
@@ -93,6 +100,9 @@ class BouncyCastleCryptoProvider(
         return KeyPair(publicKey = privateKey.generatePublicKey().encoded, privateKey = privateKey.encoded)
     }
 
+    override fun x25519PublicKey(privateKey: ByteArray): ByteArray =
+        X25519PrivateKeyParameters(privateKey, 0).generatePublicKey().encoded
+
     override fun x25519(privateKey: ByteArray, peerPublicKey: ByteArray): ByteArray {
         val agreement = X25519Agreement()
         agreement.init(X25519PrivateKeyParameters(privateKey, 0))
@@ -108,6 +118,23 @@ class BouncyCastleCryptoProvider(
         val publicKey = (pair.public as MLKEMPublicKeyParameters).encoded
         val privateKey = (pair.private as MLKEMPrivateKeyParameters).encoded
         return KeyPair(publicKey = publicKey, privateKey = privateKey)
+    }
+
+    /**
+     * FIPS 203 `KeyGen_internal(d, z)` via a replay [SecureRandom]: Bouncy Castle's generator
+     * draws exactly `d` then `z`, so replaying those 64 bytes makes it deterministic. That draw
+     * order is an implementation detail of BC — which is why the X-Wing KATs pin end-to-end
+     * outputs: a BC change breaks a test loudly instead of diverging silently.
+     */
+    override fun mlKem768KeyPairFromSeed(d: ByteArray, z: ByteArray): KeyPair {
+        require(d.size == 32 && z.size == 32) { "ML-KEM keygen seeds d and z must be 32 bytes each" }
+        val generator = MLKEMKeyPairGenerator()
+        generator.init(MLKEMKeyGenerationParameters(ReplayRandom(d + z), MLKEMParameters.ml_kem_768))
+        val pair = generator.generateKeyPair()
+        return KeyPair(
+            publicKey = (pair.public as MLKEMPublicKeyParameters).encoded,
+            privateKey = (pair.private as MLKEMPrivateKeyParameters).encoded,
+        )
     }
 
     override fun mlKem768Encapsulate(peerPublicKey: ByteArray): KemEncapsulation {
@@ -205,6 +232,18 @@ class BouncyCastleCryptoProvider(
 
     private companion object {
         const val GCM_TAG_BITS = 128
+    }
+
+    /** Replays fixed bytes as a [SecureRandom], for deterministic seed-based key generation. */
+    private class ReplayRandom(private val data: ByteArray) : SecureRandom() {
+        private var offset = 0
+        override fun nextBytes(bytes: ByteArray) {
+            require(offset + bytes.size <= data.size) {
+                "Deterministic seed exhausted: ${offset + bytes.size} > ${data.size} bytes requested"
+            }
+            data.copyInto(bytes, destinationOffset = 0, startIndex = offset, endIndex = offset + bytes.size)
+            offset += bytes.size
+        }
     }
 }
 
