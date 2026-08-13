@@ -75,25 +75,25 @@ class LaneEnvelope(
                 "Envelope of ${bytes.size} bytes exceeds the ${ProtocolLimits.MAX_ENVELOPE_BYTES}-byte limit"
             }
             val reader = FrameReader(bytes)
-            val version = canonicalNonNegativeInt(reader.readBytes())
+            val version = canonicalNonNegativeInt(reader.readBytes(MAX_INT_DIGITS))
             require(version == VERSION) { "Unsupported envelope version $version" }
             val envelope = LaneEnvelope(
                 version = version,
                 contextId = readName(reader),
                 lane = readName(reader),
-                seq = canonicalNonNegativeInt(reader.readBytes()),
-                epoch = canonicalNonNegativeInt(reader.readBytes()),
+                seq = canonicalNonNegativeInt(reader.readBytes(MAX_INT_DIGITS)),
+                epoch = canonicalNonNegativeInt(reader.readBytes(MAX_INT_DIGITS)),
                 ciphertext = reader.readBytes(),
             )
             reader.expectEnd()
             return envelope
         }
 
-        private fun readName(reader: FrameReader): String {
-            val bytes = reader.readBytes()
-            require(bytes.size <= MAX_NAME_BYTES) { "Envelope name field exceeds $MAX_NAME_BYTES bytes" }
-            return bytes.decodeUtf8Strict()
-        }
+        /** `Int.MAX_VALUE` is 10 decimal digits; a longer field cannot be a canonical int. */
+        private const val MAX_INT_DIGITS = 10
+
+        private fun readName(reader: FrameReader): String =
+            reader.readBytes(MAX_NAME_BYTES).decodeUtf8Strict()
 
         /** Exactly the digits [Int.toString] produces: no sign, no leading zero, no whitespace. */
         private fun canonicalNonNegativeInt(bytes: ByteArray): Int {

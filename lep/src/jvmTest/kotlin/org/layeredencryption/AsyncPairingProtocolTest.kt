@@ -247,19 +247,24 @@ class AsyncPairingProtocolTest {
 
     // 13
     @Test
-    fun async_wrongSizeFieldsAreRejectedBeforeAnyCryptography() {
+    fun async_wrongSizeFieldsCannotEvenBeConstructed() {
         val counting = CountingCryptoProvider(provider)
         val inviter = AsyncInviter.create(counting, DeviceKeys.generate(provider), nowEpochSeconds = now, expiryEpochSeconds = expiry)
         val response = joiner().onBundle(inviter.link, inviter.bundle, now)
 
         counting.expensiveOps = 0
-        val badCiphertext = AsyncJoinerResponse(ByteArray(8), response.deviceIdentityS, response.linkProofMac, response.joinerMac)
-        assertEquals(ResponseOutcome.Invalid, inviter.onResponse(badCiphertext, now))
-        val badLinkProof = AsyncJoinerResponse(response.kemCiphertext, response.deviceIdentityS, ByteArray(5), response.joinerMac)
-        assertEquals(ResponseOutcome.Invalid, inviter.onResponse(badLinkProof, now))
-        val badJoinerMac = AsyncJoinerResponse(response.kemCiphertext, response.deviceIdentityS, response.linkProofMac, ByteArray(5))
-        assertEquals(ResponseOutcome.Invalid, inviter.onResponse(badJoinerMac, now))
-        assertEquals(0, counting.expensiveOps, "malformed responses must be rejected by size checks alone")
+        // The constructor is the size gate: a malformed message fails before any copy is made or
+        // any cryptography runs, so the state machine never even sees it.
+        assertFailsWith<IllegalArgumentException> {
+            AsyncJoinerResponse(ByteArray(8), response.deviceIdentityS, response.linkProofMac, response.joinerMac)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AsyncJoinerResponse(response.kemCiphertext, response.deviceIdentityS, ByteArray(5), response.joinerMac)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AsyncJoinerResponse(response.kemCiphertext, response.deviceIdentityS, response.linkProofMac, ByteArray(5))
+        }
+        assertEquals(0, counting.expensiveOps, "size rejection must cost no cryptography")
         assertEquals(AsyncInviteState.PENDING, inviter.state)
     }
 

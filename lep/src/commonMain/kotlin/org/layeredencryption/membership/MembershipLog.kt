@@ -104,7 +104,7 @@ class MembershipEntry(
         private val EMPTY = ByteArray(0)
 
         internal fun deserialise(reader: FrameReader): MembershipEntry {
-            val previousHash = reader.readBytes()
+            val previousHash = reader.readBytes(GENESIS_PREVIOUS_HASH.size)
             require(previousHash.size == GENESIS_PREVIOUS_HASH.size) { "previousHash must be a SHA-256 hash" }
             val op = MembershipOp.fromCode(reader.readByte())
             val deviceIdentity = DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.SERIALISED_SIZE))
@@ -115,9 +115,9 @@ class MembershipEntry(
             // byte-compared paths (prefix comparison, hashes).
             require(wrappedFlag == 0 || wrappedFlag == 1) { "wrappedKeys flag must be 0 or 1" }
             require(wrappedFlag == 1 || wrappedBytes.isEmpty()) { "Absent wrappedKeys must be empty" }
-            val signerPublicKey = reader.readBytes()
+            val signerPublicKey = reader.readBytes(HybridSignature.PUBLIC_KEY_SIZE)
             require(signerPublicKey.size == HybridSignature.PUBLIC_KEY_SIZE) { "Signer key has wrong size" }
-            val signature = reader.readBytes()
+            val signature = reader.readBytes(HybridSignature.SIGNATURE_SIZE)
             require(signature.size == HybridSignature.SIGNATURE_SIZE) { "Signature has wrong size" }
             return MembershipEntry(
                 previousHash = previousHash,

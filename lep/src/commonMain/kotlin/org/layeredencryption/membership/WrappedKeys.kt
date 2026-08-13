@@ -49,6 +49,30 @@ import org.layeredencryption.toHexString
 object WrappedKeys {
 
     private const val WRAP_KEY_SIZE = 32
+    private const val LENGTH_PREFIX = 4
+
+    /** The one thing this construction wraps in this protocol: a 32-byte context master key. */
+    private const val CONTEXT_KEY_BYTES = 32
+
+    /** The signing public key as lowercase hex: 2 characters per byte. */
+    private const val MEMBER_ID_HEX_LENGTH = HybridSignature.PUBLIC_KEY_SIZE * 2
+
+    /**
+     * The exact size of one sealed copy — the cascade output for a 32-byte plaintext:
+     * `n1(12) ‖ n2(12) ‖ chacha(32 + tag 16) sealed by gcm(+ tag 16)`. Because the wrapped
+     * secret has one length, the sealed field has one canonical length, checked exactly.
+     */
+    internal const val SEALED_BYTES = 12 + 12 + CONTEXT_KEY_BYTES + 16 + 16
+
+    /** One copy's exact serialised size: three length-prefixed fields. */
+    private const val COPY_BYTES =
+        LENGTH_PREFIX + MEMBER_ID_HEX_LENGTH + LENGTH_PREFIX + XWing.CIPHERTEXT_SIZE + LENGTH_PREFIX + SEALED_BYTES
+
+    /**
+     * Derived from the byte budget, so the count limit and the total limit cannot disagree:
+     * the most copies that can physically fit in [ProtocolLimits.MAX_WRAPPED_KEYS_BYTES].
+     */
+    private const val MAX_RECIPIENTS = ProtocolLimits.MAX_WRAPPED_KEYS_BYTES / COPY_BYTES
 
     /** Seals [secret] once per recipient. Recipients are identified by their signing key hex. */
     fun wrapFor(
@@ -57,6 +81,8 @@ object WrappedKeys {
         secret: ByteArray,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
     ): ByteArray {
+        require(secret.size == CONTEXT_KEY_BYTES) { "WrappedKeys wraps the $CONTEXT_KEY_BYTES-byte context key" }
+        require(recipients.size <= MAX_RECIPIENTS) { "More than $MAX_RECIPIENTS recipients" }
         val ids = recipients.map { it.signingPublicKey.toHexString() }
         require(ids.toSet().size == ids.size) { "Duplicate recipient in wrap list" }
         val writer = FrameWriter()
@@ -107,6 +133,11 @@ object WrappedKeys {
      * consumers would read differently.
      */
     private fun parse(blob: ByteArray): List<Copy> {
+        // The same total budget on every path — direct callers included, not only blobs that
+        // arrived inside a membership entry.
+        require(blob.size <= ProtocolLimits.MAX_WRAPPED_KEYS_BYTES) {
+            "Wrapped-keys blob of ${blob.size} bytes exceeds the ${ProtocolLimits.MAX_WRAPPED_KEYS_BYTES}-byte limit"
+        }
         val reader = FrameReader(blob)
         val copies = mutableListOf<Copy>()
         val seen = mutableSetOf<String>()
@@ -118,17 +149,12 @@ object WrappedKeys {
             require(seen.add(memberId)) { "Duplicate wrapped-copy recipient" }
             val kemCiphertext = reader.readBytes(XWing.CIPHERTEXT_SIZE)
             require(kemCiphertext.size == XWing.CIPHERTEXT_SIZE) { "Wrapped-copy KEM ciphertext has wrong size" }
-            val sealed = reader.readBytes(ProtocolLimits.MAX_WRAPPED_SEALED_BYTES)
+            val sealed = reader.readBytes(SEALED_BYTES)
+            require(sealed.size == SEALED_BYTES) { "Sealed copy must be exactly $SEALED_BYTES bytes" }
             copies += Copy(memberId, kemCiphertext, sealed)
         }
         return copies
     }
-
-    /** The signing public key as lowercase hex: 2 characters per byte. */
-    private const val MEMBER_ID_HEX_LENGTH = HybridSignature.PUBLIC_KEY_SIZE * 2
-
-    /** Far beyond any real member list; bounds what hostile framing can make these loops build. */
-    private const val MAX_RECIPIENTS = 4_096
 
     private fun wrapKey(
         provider: CryptoProvider,

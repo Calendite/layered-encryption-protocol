@@ -18,25 +18,39 @@ enum class PairingRole(internal val label: ByteArray) {
  * swapped any of them produces a different transcript and cannot survive authentication.
  */
 class PairingTranscript(
-    val inviterXWingPublicKey: ByteArray,
-    val inviterDeviceIdentity: ByteArray,
-    val kemCiphertext: ByteArray,
-    val joinerDeviceIdentity: ByteArray,
+    inviterXWingPublicKey: ByteArray,
+    inviterDeviceIdentity: ByteArray,
+    kemCiphertext: ByteArray,
+    joinerDeviceIdentity: ByteArray,
+    sasCommitment: ByteArray,
+    /** Carried here so every derivation from this transcript uses the same labels. */
+    val namespace: ProtocolNamespace = ProtocolNamespace.Default,
+) {
+    // Copied both ways: a transcript that keyed a MAC cannot be edited into a different one.
+    private val _inviterXWingPublicKey = inviterXWingPublicKey.copyOf()
+    private val _inviterDeviceIdentity = inviterDeviceIdentity.copyOf()
+    private val _kemCiphertext = kemCiphertext.copyOf()
+    private val _joinerDeviceIdentity = joinerDeviceIdentity.copyOf()
+    private val _sasCommitment = sasCommitment.copyOf()
+
+    val inviterXWingPublicKey: ByteArray get() = _inviterXWingPublicKey.copyOf()
+    val inviterDeviceIdentity: ByteArray get() = _inviterDeviceIdentity.copyOf()
+    val kemCiphertext: ByteArray get() = _kemCiphertext.copyOf()
+    val joinerDeviceIdentity: ByteArray get() = _joinerDeviceIdentity.copyOf()
+
     /**
      * The inviter's SAS commitment, sent in its hello and bound in here so both MACs cover it.
      * A relay that swapped the commitment would change the transcript and fail the MACs.
      */
-    val sasCommitment: ByteArray,
-    /** Carried here so every derivation from this transcript uses the same labels. */
-    val namespace: ProtocolNamespace = ProtocolNamespace.Default,
-) {
+    val sasCommitment: ByteArray get() = _sasCommitment.copyOf()
+
     fun bytes(): ByteArray = FrameWriter()
         .putBytes(namespace.label(SUFFIX))
-        .putBytes(inviterXWingPublicKey)
-        .putBytes(inviterDeviceIdentity)
-        .putBytes(kemCiphertext)
-        .putBytes(joinerDeviceIdentity)
-        .putBytes(sasCommitment)
+        .putBytes(_inviterXWingPublicKey)
+        .putBytes(_inviterDeviceIdentity)
+        .putBytes(_kemCiphertext)
+        .putBytes(_joinerDeviceIdentity)
+        .putBytes(_sasCommitment)
         .toByteArray()
 
     private companion object {

@@ -18,11 +18,11 @@ internal object ProtocolLimits {
      */
     const val MAX_MEMBERSHIP_LOG_BYTES = 4 * 1024 * 1024
 
-    /** One entry's `wrappedKeys` blob: ~5.3 KB per recipient copy; ~190 copies fit. */
+    /**
+     * One entry's `wrappedKeys` blob: ~5.2 KB per recipient copy, and the recipient-count limit
+     * is derived from this budget in `WrappedKeys` so the two can never disagree.
+     */
     const val MAX_WRAPPED_KEYS_BYTES = 1024 * 1024
-
-    /** One sealed copy inside a wrapped-keys blob — a cascade-wrapped 32-byte context key. */
-    const val MAX_WRAPPED_SEALED_BYTES = 4096
 
     /** A serialised lane envelope, matching the transport's own frame bound. */
     const val MAX_ENVELOPE_BYTES = FrameChannel.MAX_FRAME_BYTES

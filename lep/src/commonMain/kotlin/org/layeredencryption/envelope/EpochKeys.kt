@@ -36,11 +36,28 @@ class EpochKeys private constructor(byEpoch: Map<Int, ByteArray>) {
     /** The newest epoch, which is the one to seal under. */
     val current: Int = this.byEpoch.keys.max()
 
+    private var destroyed = false
+
     /** The key for [current], as a defensive copy. */
-    val currentKey: ByteArray get() = byEpoch.getValue(current).copyOf()
+    val currentKey: ByteArray get() = guarded(byEpoch.getValue(current))
 
     /** Every epoch held, ascending. */
     val epochs: List<Int> get() = byEpoch.keys.sorted()
+
+    /**
+     * Zeroes every held key and makes later key reads throw [IllegalStateException] — for when a
+     * context is torn down. Idempotent, and best-effort like all in-memory scrubbing: copies
+     * already handed out are beyond reach. Instances derived via [withNextEpoch] are independent.
+     */
+    fun destroy() {
+        destroyed = true
+        byEpoch.values.forEach { it.fill(0) }
+    }
+
+    private fun guarded(key: ByteArray): ByteArray {
+        check(!destroyed) { "EpochKeys has been destroyed" }
+        return key.copyOf()
+    }
 
     /**
      * The key for [epoch] (a defensive copy), or null if this device does not hold it.
@@ -49,13 +66,17 @@ class EpochKeys private constructor(byEpoch: Map<Int, ByteArray>) {
      * keys from before it, so envelopes from those epochs are not readable here and never will be.
      * Callers should treat that as "not for me" rather than as corruption.
      */
-    operator fun get(epoch: Int): ByteArray? = byEpoch[epoch]?.copyOf()
+    operator fun get(epoch: Int): ByteArray? = byEpoch[epoch]?.let { guarded(it) }
 
     /** This set plus [key] at the next epoch. Used when a rotation happens. */
-    fun withNextEpoch(key: ByteArray): EpochKeys = EpochKeys(byEpoch + (current + 1 to key))
+    fun withNextEpoch(key: ByteArray): EpochKeys {
+        check(!destroyed) { "EpochKeys has been destroyed" }
+        return EpochKeys(byEpoch + (current + 1 to key))
+    }
 
     /** `epoch ‖ key` pairs, framed, ascending. Encrypted at rest by whatever stores it. */
     fun serialise(): ByteArray {
+        check(!destroyed) { "EpochKeys has been destroyed" }
         val writer = FrameWriter()
         for (epoch in epochs) {
             writer.putBytes(intToBytes(epoch))

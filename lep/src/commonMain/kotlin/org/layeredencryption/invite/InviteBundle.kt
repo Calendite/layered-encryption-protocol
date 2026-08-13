@@ -81,11 +81,11 @@ class InviteBundle(
         fun deserialise(bytes: ByteArray): InviteBundle {
             require(bytes.size == SERIALISED_SIZE) { "An invite bundle is exactly $SERIALISED_SIZE bytes, was ${bytes.size}" }
             val reader = FrameReader(bytes)
-            val inviteXWingPublicKey = reader.readBytes()
+            val inviteXWingPublicKey = reader.readBytes(XWing.PUBLIC_KEY_SIZE)
             require(inviteXWingPublicKey.size == XWing.PUBLIC_KEY_SIZE) { "Invite KEM key has wrong size" }
-            val deviceIdentityA = DeviceIdentity.deserialise(reader.readBytes())
-            val expiry = bigEndian8ToLong(reader.readBytes())
-            val signature = reader.readBytes()
+            val deviceIdentityA = DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.SERIALISED_SIZE))
+            val expiry = bigEndian8ToLong(reader.readBytes(8))
+            val signature = reader.readBytes(HybridSignature.SIGNATURE_SIZE)
             require(signature.size == HybridSignature.SIGNATURE_SIZE) { "Bundle signature has wrong size" }
             reader.expectEnd()
             return InviteBundle(inviteXWingPublicKey, deviceIdentityA, expiry, signature)

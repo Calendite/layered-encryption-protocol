@@ -110,13 +110,13 @@ class DeviceIdentity(
         }
 
         internal fun deserialise(reader: FrameReader): DeviceIdentity {
-            val signingPublicKey = reader.readBytes()
+            val signingPublicKey = reader.readBytes(HybridSignature.PUBLIC_KEY_SIZE)
             require(signingPublicKey.size == HybridSignature.PUBLIC_KEY_SIZE) { "Signing key has wrong size" }
-            val x25519IdentityPublicKey = reader.readBytes()
+            val x25519IdentityPublicKey = reader.readBytes(X25519_KEY_SIZE)
             require(x25519IdentityPublicKey.size == X25519_KEY_SIZE) { "X25519 identity key has wrong size" }
-            val xWingPublicKey = reader.readBytes()
+            val xWingPublicKey = reader.readBytes(XWing.PUBLIC_KEY_SIZE)
             require(xWingPublicKey.size == XWing.PUBLIC_KEY_SIZE) { "X-Wing key has wrong size" }
-            val bindingSignature = reader.readBytes()
+            val bindingSignature = reader.readBytes(HybridSignature.SIGNATURE_SIZE)
             require(bindingSignature.size == HybridSignature.SIGNATURE_SIZE) { "Binding signature has wrong size" }
             return DeviceIdentity(signingPublicKey, x25519IdentityPublicKey, xWingPublicKey, bindingSignature)
         }
@@ -151,14 +151,35 @@ class DeviceKeys(
     private val _x25519IdentityPrivateKey = x25519IdentityPrivateKey.copyOf()
     private val _xWingPrivateKey = xWingPrivateKey.copyOf()
 
-    val signingPrivateKey: ByteArray get() = _signingPrivateKey.copyOf()
-    val x25519IdentityPrivateKey: ByteArray get() = _x25519IdentityPrivateKey.copyOf()
+    private var destroyed = false
+
+    val signingPrivateKey: ByteArray get() = guarded(_signingPrivateKey)
+    val x25519IdentityPrivateKey: ByteArray get() = guarded(_x25519IdentityPrivateKey)
 
     /** Opens what others encapsulate to [DeviceIdentity.xWingPublicKey]. */
-    val xWingPrivateKey: ByteArray get() = _xWingPrivateKey.copyOf()
+    val xWingPrivateKey: ByteArray get() = guarded(_xWingPrivateKey)
 
     /** The hybrid signing keypair, in the [KeyPair] shape the membership log expects. */
-    val signingKeyPair: KeyPair get() = KeyPair(identity.signingPublicKey, _signingPrivateKey.copyOf())
+    val signingKeyPair: KeyPair get() = KeyPair(identity.signingPublicKey, guarded(_signingPrivateKey))
+
+    /**
+     * Zeroes the private keys and makes every later private-key read throw
+     * [IllegalStateException] — explicit end-of-life for the one long-lived secret holder a
+     * device keeps. Idempotent. The public [identity] stays readable; snapshots already handed
+     * out, and transient provider buffers on a garbage-collected runtime, are necessarily beyond
+     * this object's reach — best-effort, as all in-memory scrubbing is.
+     */
+    fun destroy() {
+        destroyed = true
+        _signingPrivateKey.fill(0)
+        _x25519IdentityPrivateKey.fill(0)
+        _xWingPrivateKey.fill(0)
+    }
+
+    private fun guarded(key: ByteArray): ByteArray {
+        check(!destroyed) { "DeviceKeys has been destroyed" }
+        return key.copyOf()
+    }
 
     companion object {
         /** Generates a fresh device identity: hybrid signing + X25519 keypairs bound by a signature. */

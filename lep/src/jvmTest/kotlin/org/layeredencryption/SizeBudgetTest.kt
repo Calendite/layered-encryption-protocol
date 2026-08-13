@@ -110,6 +110,51 @@ class SizeBudgetTest {
     }
 
     @Test
+    fun everyFixedPairingFieldRejectsOneByteShortAndOneByteLong() {
+        val identity = device.identity.serialise()
+        class Message(val tag: Int, val fields: List<ByteArray>, val decode: (ByteArray) -> Any)
+        val messages = listOf(
+            Message(PairingWire.TAG_INVITER_HELLO, listOf(ByteArray(XWing.PUBLIC_KEY_SIZE), identity, ByteArray(32))) { PairingWire.decodeInviterHello(it) },
+            Message(PairingWire.TAG_JOINER_RESPONSE, listOf(ByteArray(XWing.CIPHERTEXT_SIZE), identity, ByteArray(32))) { PairingWire.decodeJoinerResponse(it) },
+            Message(PairingWire.TAG_INVITER_CONFIRM, listOf(ByteArray(32), ByteArray(32))) { PairingWire.decodeInviterConfirm(it) },
+        )
+        for (message in messages) {
+            message.decode(frame(message.tag, message.fields)) // the exact sizes decode
+            for (index in message.fields.indices) {
+                for (delta in intArrayOf(-1, +1)) {
+                    val mutated = message.fields.mapIndexed { i, field ->
+                        if (i == index) ByteArray(field.size + delta) else field
+                    }
+                    assertFailsWith<PairingException>("tag ${message.tag}, field $index, delta $delta") {
+                        message.decode(frame(message.tag, mutated))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun frame(tag: Int, fields: List<ByteArray>): ByteArray {
+        val writer = FrameWriter().putByte(tag)
+        fields.forEach { writer.putBytes(it) }
+        return writer.toByteArray()
+    }
+
+    @Test
+    fun totalBudgetsBiteAtExactlyLimitPlusOne() {
+        // At the limit: past the budget gate (the zeros then fail for content reasons).
+        val atLimit = assertFailsWith<IllegalArgumentException> {
+            MembershipLog.deserialise(ByteArray(ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES))
+        }
+        assertTrue(!atLimit.message!!.contains("exceeds the ${ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES}"), "the limit itself passes the gate")
+
+        // One past the limit: the budget error, before any parsing.
+        val overLimit = assertFailsWith<IllegalArgumentException> {
+            MembershipLog.deserialise(ByteArray(ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES + 1))
+        }
+        assertTrue(overLimit.message!!.contains("exceeds"))
+    }
+
+    @Test
     fun inviterComplete_rejectsAnOversizeMembershipLog() {
         val oversize = FrameWriter()
             .putByte(PairingWire.TAG_INVITER_COMPLETE)

@@ -85,10 +85,25 @@ class WrappedKeysCanonicalTest {
     }
 
     @Test
-    fun oversizeSealedPayloadFailsTheBlob() {
-        val (id, ct, _) = fieldsOf(WrappedKeys.wrapFor(provider, listOf(alice.identity), secret))
-        val oversize = blobOf(id, ct, ByteArray(ProtocolLimits.MAX_WRAPPED_SEALED_BYTES + 1))
-        assertNull(WrappedKeys.unwrapFor(provider, oversize, alice))
+    fun sealedPayloadMustBeExactlyTheCanonicalSize() {
+        val (id, ct, sealed) = fieldsOf(WrappedKeys.wrapFor(provider, listOf(alice.identity), secret))
+        assertEquals(WrappedKeys.SEALED_BYTES, sealed.size, "the wrap side produces the canonical size")
+        assertNull(WrappedKeys.unwrapFor(provider, blobOf(id, ct, ByteArray(sealed.size + 1)), alice), "one byte long")
+        assertNull(WrappedKeys.unwrapFor(provider, blobOf(id, ct, ByteArray(sealed.size - 1)), alice), "one byte short")
+    }
+
+    @Test
+    fun totalBudgetAppliesOnEveryPath() {
+        val oversize = ByteArray(ProtocolLimits.MAX_WRAPPED_KEYS_BYTES + 1)
+        assertNull(WrappedKeys.unwrapFor(provider, oversize, alice), "direct unwrap is budgeted")
+        assertTrue(WrappedKeys.recipientsOf(oversize).isEmpty(), "direct recipient listing is budgeted")
+    }
+
+    @Test
+    fun wrapForRejectsANonContextKeySecret() {
+        assertFailsWith<IllegalArgumentException> {
+            WrappedKeys.wrapFor(provider, listOf(alice.identity), provider.randomBytes(16))
+        }
     }
 
     @Test

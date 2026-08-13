@@ -3,6 +3,7 @@ package org.layeredencryption.pairing
 import org.layeredencryption.Cascade
 import org.layeredencryption.envelope.EpochKeys
 import org.layeredencryption.CryptoProvider
+import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.XWing
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.identity.DeviceKeys
@@ -16,8 +17,13 @@ class PairingException(message: String) : Exception(message)
 
 // ── Wire messages (transport-agnostic; §6.3 steps 1–6) ────────────────────────────────────────
 //
-// Every message copies its byte arrays on construction: what the state machines verify is the
-// message's own snapshot, which the producer of the arrays cannot mutate afterwards.
+// Every message validates its protocol-fixed sizes BEFORE copying (a transport feeding one peer
+// bytes should treat the IllegalArgumentException as "invalid message"), and every read returns
+// a copy: the message is an immutable snapshot from construction onward.
+
+private const val WIRE_MAC_BYTES = 32
+private const val SAS_COMMITMENT_BYTES = 32
+private const val SAS_NONCE_BYTES = 32
 
 /** Step 1: inviter → joiner. The ephemeral X-Wing public key + inviter device identity. */
 class InviterHello(
@@ -25,29 +31,61 @@ class InviterHello(
     val inviterDeviceIdentity: DeviceIdentity,
     sasCommitment: ByteArray,
 ) {
-    val xWingPublicKey: ByteArray = xWingPublicKey.copyOf()
+    init {
+        require(xWingPublicKey.size == XWing.PUBLIC_KEY_SIZE) { "X-Wing public key must be ${XWing.PUBLIC_KEY_SIZE} bytes" }
+        require(sasCommitment.size == SAS_COMMITMENT_BYTES) { "SAS commitment must be $SAS_COMMITMENT_BYTES bytes" }
+    }
+
+    private val _xWingPublicKey = xWingPublicKey.copyOf()
+    private val _sasCommitment = sasCommitment.copyOf()
+
+    val xWingPublicKey: ByteArray get() = _xWingPublicKey.copyOf()
 
     /** Binds the inviter to a SAS nonce before it can see the joiner's ciphertext. */
-    val sasCommitment: ByteArray = sasCommitment.copyOf()
+    val sasCommitment: ByteArray get() = _sasCommitment.copyOf()
 }
 
 /** Step 2/4: joiner → inviter. The KEM ciphertext, joiner device identity, and the joiner's MAC. */
 class JoinerResponse(kemCiphertext: ByteArray, val joinerDeviceIdentity: DeviceIdentity, joinerMac: ByteArray) {
-    val kemCiphertext: ByteArray = kemCiphertext.copyOf()
-    val joinerMac: ByteArray = joinerMac.copyOf()
+    init {
+        require(kemCiphertext.size == XWing.CIPHERTEXT_SIZE) { "KEM ciphertext must be ${XWing.CIPHERTEXT_SIZE} bytes" }
+        require(joinerMac.size == WIRE_MAC_BYTES) { "joinerMac must be $WIRE_MAC_BYTES bytes" }
+    }
+
+    private val _kemCiphertext = kemCiphertext.copyOf()
+    private val _joinerMac = joinerMac.copyOf()
+
+    val kemCiphertext: ByteArray get() = _kemCiphertext.copyOf()
+    val joinerMac: ByteArray get() = _joinerMac.copyOf()
 }
 
 /** Step 4: inviter → joiner. The inviter's MAC, proving the inviter also knows the code. */
 class InviterConfirm(inviterMac: ByteArray, sasNonce: ByteArray) {
-    val inviterMac: ByteArray = inviterMac.copyOf()
+    init {
+        require(inviterMac.size == WIRE_MAC_BYTES) { "inviterMac must be $WIRE_MAC_BYTES bytes" }
+        require(sasNonce.size == SAS_NONCE_BYTES) { "SAS nonce must be $SAS_NONCE_BYTES bytes" }
+    }
+
+    private val _inviterMac = inviterMac.copyOf()
+    private val _sasNonce = sasNonce.copyOf()
+
+    val inviterMac: ByteArray get() = _inviterMac.copyOf()
 
     /** Opens the commitment from the hello; only now can the joiner compute the SAS. */
-    val sasNonce: ByteArray = sasNonce.copyOf()
+    val sasNonce: ByteArray get() = _sasNonce.copyOf()
 }
 
 /** Step 6: inviter → joiner. The membership log carrying the master key wrapped under K_handshake. */
 class InviterComplete(membershipLog: ByteArray) {
-    val membershipLog: ByteArray = membershipLog.copyOf()
+    init {
+        require(membershipLog.size <= ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES) {
+            "Membership log of ${membershipLog.size} bytes exceeds the ${ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES}-byte limit"
+        }
+    }
+
+    private val _membershipLog = membershipLog.copyOf()
+
+    val membershipLog: ByteArray get() = _membershipLog.copyOf()
 }
 
 /**

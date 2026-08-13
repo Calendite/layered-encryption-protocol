@@ -13,6 +13,7 @@ import org.layeredencryption.pairing.Handshake
 import org.layeredencryption.pairing.PairingException
 import org.layeredencryption.pairing.PairingRole
 import org.layeredencryption.pairing.constantTimeEquals
+import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.ProtocolLock
 import org.layeredencryption.toHexString
 
@@ -26,7 +27,9 @@ enum class AsyncInviteState { PENDING, CLAIMED, APPROVED, REJECTED, EXPIRED }
  * cheap pre-authentication gate the inviter checks before any expensive cryptography, and
  * [joinerMac] binds the full handshake once the key agreement has run.
  *
- * Arrays are copied on construction: what the inviter verifies is this message's own snapshot.
+ * The constructor validates the protocol-fixed sizes **before** copying (a transport feeding it
+ * peer bytes should treat the [IllegalArgumentException] as "invalid message"), and every read
+ * returns a copy — the message is an immutable snapshot from construction onward.
  */
 class AsyncJoinerResponse(
     kemCiphertext: ByteArray,
@@ -34,23 +37,61 @@ class AsyncJoinerResponse(
     linkProofMac: ByteArray,
     joinerMac: ByteArray,
 ) {
-    val kemCiphertext: ByteArray = kemCiphertext.copyOf()
-    val linkProofMac: ByteArray = linkProofMac.copyOf()
-    val joinerMac: ByteArray = joinerMac.copyOf()
+    init {
+        require(kemCiphertext.size == XWing.CIPHERTEXT_SIZE) { "KEM ciphertext must be ${XWing.CIPHERTEXT_SIZE} bytes" }
+        require(linkProofMac.size == WIRE_MAC_BYTES) { "linkProofMac must be $WIRE_MAC_BYTES bytes" }
+        require(joinerMac.size == WIRE_MAC_BYTES) { "joinerMac must be $WIRE_MAC_BYTES bytes" }
+    }
+
+    private val _kemCiphertext = kemCiphertext.copyOf()
+    private val _linkProofMac = linkProofMac.copyOf()
+    private val _joinerMac = joinerMac.copyOf()
+
+    val kemCiphertext: ByteArray get() = _kemCiphertext.copyOf()
+    val linkProofMac: ByteArray get() = _linkProofMac.copyOf()
+    val joinerMac: ByteArray get() = _joinerMac.copyOf()
 }
 
-/** Emitted by the inviter A **only** from `approve()`: the master key inside a signed membership log. */
+/**
+ * Emitted by the inviter A **only** from `approve()`: the master key inside a signed membership
+ * log. Sizes are validated before the copies are made; reads return copies.
+ */
 class AsyncDelivery(inviterMac: ByteArray, serialisedMembershipLog: ByteArray) {
-    val inviterMac: ByteArray = inviterMac.copyOf()
-    val serialisedMembershipLog: ByteArray = serialisedMembershipLog.copyOf()
+    init {
+        require(inviterMac.size == WIRE_MAC_BYTES) { "inviterMac must be $WIRE_MAC_BYTES bytes" }
+        require(serialisedMembershipLog.size <= ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES) {
+            "Membership log of ${serialisedMembershipLog.size} bytes exceeds the ${ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES}-byte limit"
+        }
+    }
+
+    private val _inviterMac = inviterMac.copyOf()
+    private val _serialisedMembershipLog = serialisedMembershipLog.copyOf()
+
+    val inviterMac: ByteArray get() = _inviterMac.copyOf()
+    val serialisedMembershipLog: ByteArray get() = _serialisedMembershipLog.copyOf()
 }
+
+/** HMAC-SHA256 output: the size of every MAC on the async wire. */
+private const val WIRE_MAC_BYTES = 32
 
 /** The outcome of feeding a response to [AsyncInviter.onResponse]. */
 sealed interface ResponseOutcome {
     /** First valid response: the invite is now CLAIMED and awaiting the owner's approval. */
-    data class Claimed(val shortAuthString: String, val joinerFingerprint: ByteArray) : ResponseOutcome
+    class Claimed(val shortAuthString: String, joinerFingerprint: ByteArray) : ResponseOutcome {
+        private val _joinerFingerprint = joinerFingerprint.copyOf()
+
+        /** The fingerprint to show the owner, as a defensive copy. */
+        val joinerFingerprint: ByteArray get() = _joinerFingerprint.copyOf()
+    }
     /** A later valid response arrived after the invite was already claimed (the real partner sees the race). */
     data object AlreadyClaimed : ResponseOutcome
+
+    /**
+     * Another instance that resumed the same durable record won the store's atomic consume: the
+     * invite was claimed elsewhere, not here. Distinct from [Invalid] (the response was fine) and
+     * from a storage fault (which throws) — this instance is dead and has expired itself.
+     */
+    data object ConsumedElsewhere : ResponseOutcome
     /** Bad MAC or bad identity binding — dropped without any state change. */
     data object Invalid : ResponseOutcome
     /** The invite had expired. */
@@ -137,9 +178,16 @@ class AsyncInviter private constructor(
             null
         } ?: return ResponseOutcome.Invalid
 
-        // The transition burns the durable record before anything is published (non-resumable
-        // claims). If the store throws, nothing has changed — no claim, still PENDING — and the
-        // storage fault propagates to the caller, which is a different thing than a peer verdict.
+        // The single-use gate: publishing a claim requires *winning* the store's atomic consume,
+        // which burns the durable record (non-resumable claims). Exactly one instance wins, even
+        // when several processes resumed the same record. Losing is not a storage fault — another
+        // instance claimed first — so this instance expires itself (terminal scrub; the record is
+        // already gone) and reports the loss distinctly. A store *exception* still propagates
+        // with nothing changed: no claim, still PENDING.
+        if (store != null && !store.consume(ridAsync.toHexString())) {
+            transitionTo(AsyncInviteState.EXPIRED)
+            return ResponseOutcome.ConsumedElsewhere
+        }
         transitionTo(AsyncInviteState.CLAIMED)
         claim = evaluated.claim
         return ResponseOutcome.Claimed(evaluated.shortAuthString, evaluated.joinerFingerprint)
@@ -230,9 +278,9 @@ class AsyncInviter private constructor(
      * The storage failure model (LEP-07 retest, issue 7.2): stores can throw, so each transition
      * is ordered to fail safe.
      *
-     * - `PENDING → CLAIMED` removes the durable record *before* publishing anything: claims are
-     *   non-resumable, so the record is burned first, and a store failure propagates with the
-     *   invite unchanged — still fully `PENDING`, durable, and claimable.
+     * - `PENDING → CLAIMED` is published only after the caller has *won* `store.consume()` (see
+     *   the claim path in `handleResponse`): claims are non-resumable and single-use across
+     *   every instance that resumed the record.
      * - Terminal transitions publish the state first, then scrub the link secret, invite KEM
      *   seed, and claimed session key **unconditionally** (in a `finally`). A store failure
      *   cannot resurrect the invite or lose an [approve] delivery: it is recorded in
@@ -244,8 +292,7 @@ class AsyncInviter private constructor(
             throw PairingException("Illegal invite transition: $state → $next")
         }
         if (next == AsyncInviteState.CLAIMED) {
-            store?.remove(ridAsync.toHexString()) // may throw: nothing has been published yet
-            state = next
+            state = next // the durable record was consumed by the caller before publishing
             return
         }
         state = next

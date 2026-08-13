@@ -133,6 +133,50 @@ class ImmutabilityTest {
     }
 
     @Test
+    fun wireMessages_getterResultsAreCopies() {
+        val inviter = AsyncInviter.create(provider, DeviceKeys.generate(provider), nowEpochSeconds = now, expiryEpochSeconds = expiry)
+        val joiner = AsyncJoiner(provider, DeviceKeys.generate(provider))
+        val response = joiner.onBundle(inviter.link, inviter.bundle, now)
+
+        // Async response: mutate every getter result, then verify the message still authenticates.
+        response.kemCiphertext.fill(0)
+        response.linkProofMac.fill(0)
+        response.joinerMac.fill(0)
+        val outcome = inviter.onResponse(response, now)
+        assertTrue(outcome is ResponseOutcome.Claimed, "mutated reads must not have altered the message")
+
+        // The Claimed outcome's fingerprint is a copy too.
+        val fingerprint = outcome.joinerFingerprint
+        outcome.joinerFingerprint.fill(0)
+        assertContentEquals(fingerprint, outcome.joinerFingerprint)
+
+        // Delivery: mutate reads, then the joiner still completes.
+        val delivery = inviter.approve()
+        delivery.inviterMac.fill(0)
+        delivery.serialisedMembershipLog.fill(0)
+        joiner.onDelivery(delivery)
+        assertContentEquals(inviter.masterKey(), joiner.masterKey())
+
+        // Live-pairing messages: encoding is stable under getter mutation.
+        val hello = org.layeredencryption.pairing.InviterHello(
+            provider.randomBytes(XWing.PUBLIC_KEY_SIZE), DeviceKeys.generate(provider).identity, provider.randomBytes(32),
+        )
+        val encoded = org.layeredencryption.pairing.PairingWire.encode(hello)
+        hello.xWingPublicKey.fill(0)
+        hello.sasCommitment.fill(0)
+        assertContentEquals(encoded, org.layeredencryption.pairing.PairingWire.encode(hello))
+
+        // The transcript that keys the MACs cannot be edited after the fact.
+        val transcript = org.layeredencryption.pairing.PairingTranscript(
+            provider.randomBytes(XWing.PUBLIC_KEY_SIZE), ByteArray(8), provider.randomBytes(XWing.CIPHERTEXT_SIZE), ByteArray(8), provider.randomBytes(32),
+        )
+        val canonical = transcript.bytes()
+        transcript.inviterXWingPublicKey.fill(0)
+        transcript.sasCommitment.fill(0)
+        assertContentEquals(canonical, transcript.bytes())
+    }
+
+    @Test
     fun wireMessages_snapshotTheirInputs() {
         val inviter = AsyncInviter.create(provider, DeviceKeys.generate(provider), nowEpochSeconds = now, expiryEpochSeconds = expiry)
         val joiner = AsyncJoiner(provider, DeviceKeys.generate(provider))

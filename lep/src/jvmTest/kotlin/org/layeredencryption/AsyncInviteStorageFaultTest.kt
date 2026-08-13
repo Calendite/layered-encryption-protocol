@@ -34,12 +34,17 @@ class AsyncInviteStorageFaultTest {
     private class FaultyStore(private val delegate: InviteStore = InMemoryInviteStore()) : InviteStore {
         var failPut = false
         var failRemove = false
+        var failConsume = false
         override fun put(invite: PendingInvite) {
             if (failPut) throw RuntimeException("store down (put)")
             delegate.put(invite)
         }
         override fun get(ridAsyncHex: String): PendingInvite? = delegate.get(ridAsyncHex)
         override fun all(): List<PendingInvite> = delegate.all()
+        override fun consume(ridAsyncHex: String): Boolean {
+            if (failConsume) throw RuntimeException("store down (consume)")
+            return delegate.consume(ridAsyncHex)
+        }
         override fun remove(ridAsyncHex: String) {
             if (failRemove) throw RuntimeException("store down (remove)")
             delegate.remove(ridAsyncHex)
@@ -61,12 +66,12 @@ class AsyncInviteStorageFaultTest {
     }
 
     @Test
-    fun claimTimeRemoveFailureLeavesTheInviteFullyClaimable() {
+    fun claimTimeConsumeFailureLeavesTheInviteFullyClaimable() {
         val store = FaultyStore()
         val inviter = inviter(store = store)
         val response = joiner().onBundle(inviter.link, inviter.bundle, now)
 
-        store.failRemove = true
+        store.failConsume = true
         assertFailsWith<RuntimeException>("a storage fault is not a peer verdict") {
             inviter.onResponse(response, now)
         }
@@ -75,9 +80,82 @@ class AsyncInviteStorageFaultTest {
         assertFalse(inviter.isScrubbed(), "the invite must remain live")
 
         // The same response claims cleanly once the store recovers.
-        store.failRemove = false
+        store.failConsume = false
         assertTrue(inviter.onResponse(response, now) is ResponseOutcome.Claimed)
         assertTrue(store.all().isEmpty(), "the recovered claim burns the record")
+    }
+
+    // ── Single-use across resumed instances (b12169b review, issue 2) ─────────────────────────
+
+    @Test
+    fun twoResumedInstancesCannotBothClaim() {
+        val device = DeviceKeys.generate(provider)
+        val store = InMemoryInviteStore()
+        val original = inviter(device, store)
+        val record = store.all().single()
+
+        // Two processes resumed the same snapshot. One valid response fits both instances: the
+        // transcript binds the invite fields, all identical across resumes.
+        val instanceA = AsyncInviter.resume(provider, device, record, nowEpochSeconds = now, store = store)
+        val instanceB = AsyncInviter.resume(provider, device, record, nowEpochSeconds = now, store = store)
+        val response = joiner().onBundle(original.link, instanceA.bundle, now)
+
+        val first = instanceA.onResponse(response, now)
+        val second = instanceB.onResponse(response, now)
+
+        assertTrue(first is ResponseOutcome.Claimed, "the winner claims")
+        assertEquals(ResponseOutcome.ConsumedElsewhere, second, "the loser learns it lost, distinctly")
+        assertEquals(AsyncInviteState.EXPIRED, instanceB.state, "the loser is dead")
+        assertTrue(instanceB.isScrubbed(), "the loser scrubs its secrets")
+        assertTrue(store.all().isEmpty(), "exactly one consume burned the record")
+    }
+
+    @Test
+    fun racingResumedInstancesHaveExactlyOneWinner() {
+        repeat(10) {
+            val device = DeviceKeys.generate(provider)
+            val store = InMemoryInviteStore()
+            val original = inviter(device, store)
+            val record = store.all().single()
+            val instanceA = AsyncInviter.resume(provider, device, record, nowEpochSeconds = now, store = store)
+            val instanceB = AsyncInviter.resume(provider, device, record, nowEpochSeconds = now, store = store)
+            val response = joiner().onBundle(original.link, instanceA.bundle, now)
+
+            val barrier = CyclicBarrier(2)
+            var outcomeA: ResponseOutcome? = null
+            var outcomeB: ResponseOutcome? = null
+            val a = thread { barrier.await(); outcomeA = instanceA.onResponse(response, now) }
+            val b = thread { barrier.await(); outcomeB = instanceB.onResponse(response, now) }
+            a.join(); b.join()
+
+            val claims = listOf(outcomeA, outcomeB).count { it is ResponseOutcome.Claimed }
+            assertEquals(1, claims, "exactly one instance may claim, got A=$outcomeA B=$outcomeB")
+            assertEquals(
+                1,
+                listOf(outcomeA, outcomeB).count { it == ResponseOutcome.ConsumedElsewhere },
+                "the other must see ConsumedElsewhere",
+            )
+        }
+    }
+
+    @Test
+    fun staleSnapshotCannotBeResumedIntoAClaimableInvite() {
+        val device = DeviceKeys.generate(provider)
+        val store = InMemoryInviteStore()
+        val original = inviter(device, store)
+        val record = store.all().single() // captured before consumption, like a backup would be
+
+        // The invite is claimed and approved for real.
+        val joiner = joiner()
+        original.onResponse(joiner.onBundle(original.link, original.bundle, now), now)
+        joiner.onDelivery(original.approve())
+
+        // Replaying the stale snapshot yields an instance that can never claim.
+        val replayed = AsyncInviter.resume(provider, device, record, nowEpochSeconds = now, store = store)
+        val response = AsyncJoiner(provider, DeviceKeys.generate(provider)).onBundle(original.link, replayed.bundle, now)
+        assertEquals(ResponseOutcome.ConsumedElsewhere, replayed.onResponse(response, now))
+        assertEquals(AsyncInviteState.EXPIRED, replayed.state)
+        assertTrue(store.all().isEmpty(), "cleanup retries never resurrect a consumed record")
     }
 
     @Test

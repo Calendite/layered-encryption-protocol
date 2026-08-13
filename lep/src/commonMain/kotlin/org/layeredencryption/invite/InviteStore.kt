@@ -1,5 +1,6 @@
 package org.layeredencryption.invite
 
+import org.layeredencryption.ProtocolLock
 import org.layeredencryption.toHexString
 
 /**
@@ -68,21 +69,47 @@ interface InviteStore {
     fun put(invite: PendingInvite)
     fun get(ridAsyncHex: String): PendingInvite?
     fun all(): List<PendingInvite>
+
+    /**
+     * Atomically consumes the live record: returns `true` for **exactly one** caller — the one
+     * whose removal observed a live record — and `false` for every caller after it, or for an id
+     * that was never stored.
+     *
+     * This is the single-use gate for claims. Two *processes* that resumed the same `PENDING`
+     * snapshot race through here, and exactly one may win, so the atomicity MUST live in the
+     * backing store itself — a transaction, a compare-and-delete — not merely under an
+     * in-process lock. A production adapter should tombstone rather than plainly delete, so a
+     * stale backup cannot recreate a consumed id while it is still security-relevant.
+     */
+    fun consume(ridAsyncHex: String): Boolean
+
+    /** Idempotent removal, for cleanup paths — never the claim gate; that is [consume]. */
     fun remove(ridAsyncHex: String)
 }
 
+/**
+ * The reference [InviteStore]: in-memory, lock-synchronised so [consume] is atomic across
+ * instances sharing it in one process. Production adapters must additionally make it atomic
+ * across processes; `InviteStoreConformanceTest` is the suite they must pass.
+ */
 class InMemoryInviteStore : InviteStore {
+    private val lock = ProtocolLock()
     private val invites = mutableMapOf<String, PendingInvite>()
 
-    override fun put(invite: PendingInvite) {
+    override fun put(invite: PendingInvite): Unit = lock.withLock {
         invites[invite.ridAsyncHex] = invite
     }
 
-    override fun get(ridAsyncHex: String): PendingInvite? = invites[ridAsyncHex]
+    override fun get(ridAsyncHex: String): PendingInvite? = lock.withLock { invites[ridAsyncHex] }
 
-    override fun all(): List<PendingInvite> = invites.values.toList()
+    override fun all(): List<PendingInvite> = lock.withLock { invites.values.toList() }
 
-    override fun remove(ridAsyncHex: String) {
+    override fun consume(ridAsyncHex: String): Boolean = lock.withLock {
+        invites.remove(ridAsyncHex) != null
+    }
+
+    override fun remove(ridAsyncHex: String): Unit = lock.withLock {
         invites.remove(ridAsyncHex)
+        Unit
     }
 }
