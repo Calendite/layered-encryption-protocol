@@ -14,10 +14,10 @@ means. You hand it bytes; it hands back sealed bytes, and vice versa.
 
 ```
                     ┌──────────────────────────────────────────┐
-your app ──bytes──▶ │  seal   ChaCha20-Poly1305 → AES-256-GCM   │ ──▶ sealed envelope
-                    │  keys   X25519 + ML-KEM-768 (X-Wing)      │
-your app ◀─bytes─── │  sign   Ed25519 + ML-DSA-65 (both must)    │ ◀── sealed envelope
-                    │  trust  SAS pairing, signed member log    │
+your app ──bytes──▶ │  seal   ChaCha20-Poly1305 → AES-256-GCM  │ ──▶ sealed envelope
+                    │  keys   X25519 + ML-KEM-768 (X-Wing)     │
+your app ◀─bytes─── │  sign   Ed25519 + ML-DSA-65 (both must)  │ ◀── sealed envelope
+                    │  trust  SAS pairing, signed member log   │
                     └──────────────────────────────────────────┘
 ```
 
