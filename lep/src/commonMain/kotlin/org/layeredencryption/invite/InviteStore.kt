@@ -9,6 +9,11 @@ import org.layeredencryption.toHexString
  * partner sleeps: the secret, the invite X-Wing keypair, the context master key to release, the
  * expiry, and the current state. The live claimed-context (`K_async`, transcript) is deliberately
  * **not** here — durable resume of an in-flight claim is a Phase 2 concern.
+ *
+ * Only `PENDING` and `CLAIMED` invites exist at rest: a terminal transition (`APPROVED`,
+ * `REJECTED`, `EXPIRED`) removes the record and zeroes the invite-scoped key material instead of
+ * writing it back. Context-master-key custody after approval is the application's
+ * responsibility, outside this store.
  */
 class PendingInvite(
     val ridAsync: ByteArray,
@@ -25,6 +30,11 @@ class PendingInvite(
 /**
  * Persistence for pending invites. Production implementation is hardware-wrapped at rest (design
  * §4.6) and deferred; [InMemoryInviteStore] is the reference implementation used in tests.
+ *
+ * A production adapter must treat these records as key material: encrypt them under a
+ * platform-keystore-wrapped key, authenticate and rollback-protect them, and honour [remove]
+ * eagerly — a removed invite's bytes should not survive in the backing storage. It must
+ * not write them to backups or logs.
  */
 interface InviteStore {
     fun put(invite: PendingInvite)

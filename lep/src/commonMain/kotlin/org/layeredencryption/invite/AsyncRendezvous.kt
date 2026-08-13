@@ -15,7 +15,7 @@ import org.layeredencryption.CryptoProvider
  *
  * Hashing hides the secret from anyone who has not seen the link, but `rid_async` itself is an
  * **offline** verifier: the relay sees it and can test candidate secrets locally, with no rate
- * limit or interaction (LEP-01). Security therefore rests entirely on the secret's entropy —
+ * limit or interaction. Security therefore rests entirely on the secret's entropy —
  * 256 bits in the `A2` link, after the 64-bit `A1` secret proved searchable at GPU-farm scale.
  */
 object AsyncRendezvous {

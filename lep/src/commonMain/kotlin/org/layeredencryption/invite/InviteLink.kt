@@ -17,7 +17,7 @@ import kotlin.io.encoding.ExperimentalEncodingApi
  * - `fp` — first 16 bytes of `SHA-256(ed25519_pk_A)`, base64url unpadded (22 chars). Pins the
  *   inviter's identity so a relay that swaps the bundle is caught (§2.7 step 2).
  *
- * `A2` replaces the 8-byte-secret `A1` format (LEP-01). `rid_async` is a hash of the secret that
+ * `A2` replaces the 8-byte-secret `A1` format. `rid_async` is a hash of the secret that
  * the relay necessarily sees, which makes it an **offline** verifier for secret guesses: at 64 bits
  * a GPU farm could cover the keyspace within an invite's lifetime. At 256 bits the same attack is
  * out of reach, and the secret travels in a link/QR code so the extra length costs nothing.
@@ -53,7 +53,7 @@ class InviteLink(val secret: ByteArray, val fingerprint: ByteArray) {
         /**
          * Strictly parses a fragment payload (`A2.<secret>.<fp>`), or returns `null` if malformed.
          * Legacy `A1` links are rejected here by the tag check — their 64-bit secrets are
-         * brute-forceable offline (LEP-01) and must not be honoured.
+         * brute-forceable offline and must not be honoured.
          */
         fun parse(fragment: String): InviteLink? {
             val body = fragment.substringAfter('#', fragment) // tolerate a full URL or bare fragment

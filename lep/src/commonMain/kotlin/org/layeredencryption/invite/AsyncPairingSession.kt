@@ -23,8 +23,8 @@ enum class AsyncInviteState { PENDING, CLAIMED, APPROVED, REJECTED, EXPIRED }
 
 /**
  * Posted by the joiner S at `rid_async`; gated on link possession twice: [linkProofMac] is the
- * cheap pre-authentication gate the inviter checks before any expensive cryptography (LEP-01 /
- * LEP-06), and [joinerMac] binds the full handshake once the key agreement has run.
+ * cheap pre-authentication gate the inviter checks before any expensive cryptography, and
+ * [joinerMac] binds the full handshake once the key agreement has run.
  */
 class AsyncJoinerResponse(
     val kemCiphertext: ByteArray,
@@ -87,6 +87,11 @@ class AsyncInviter private constructor(
     /**
      * Ingests a joiner response. Only a `PENDING` invite accepts one; the first valid response claims
      * it. Invalid responses are dropped without state change; later valid ones report [ResponseOutcome.AlreadyClaimed].
+     *
+     * Never throws for peer-supplied input — every malformed or hostile response maps to a
+     * [ResponseOutcome]. What this cannot do from inside the library: bound how *often*
+     * it is called. The transport in front of it should rate-limit each rendezvous and cap
+     * concurrent responses, even though a failed response is now cheap.
      */
     fun onResponse(response: AsyncJoinerResponse, nowEpochSeconds: Long): ResponseOutcome =
         claimLock.withLock { handleResponse(response, nowEpochSeconds) }
@@ -96,12 +101,12 @@ class AsyncInviter private constructor(
         if (state != AsyncInviteState.PENDING) return ResponseOutcome.AlreadyClaimed
         if (nowEpochSeconds > expiryEpochSeconds) return expire()
 
-        // Exact sizes before any cryptography (LEP-06): malformed responses cost nothing.
+        // Exact sizes before any cryptography: malformed responses cost nothing.
         if (response.kemCiphertext.size != XWing.CIPHERTEXT_SIZE) return ResponseOutcome.Invalid
         if (response.linkProofMac.size != MAC_SIZE) return ResponseOutcome.Invalid
         if (response.joinerMac.size != MAC_SIZE) return ResponseOutcome.Invalid
 
-        // The cheap link-possession gate (LEP-01 / LEP-06): one HMAC, verified before the hybrid
+        // The cheap link-possession gate: one HMAC, verified before the hybrid
         // identity signatures, ML-KEM decapsulation, and X25519 below. A responder who never saw
         // the link stops here without making us spend post-quantum compute.
         val expectedLinkProof = AsyncHandshake.linkProofMac(
@@ -109,7 +114,26 @@ class AsyncInviter private constructor(
         )
         if (!response.linkProofMac.constantTimeEquals(expectedLinkProof)) return ResponseOutcome.Invalid
 
-        if (!response.deviceIdentityS.verifyBinding(provider)) return ResponseOutcome.Invalid
+        // A link holder can still send garbage — a mangled KEM ciphertext, a low-order X25519
+        // point — and the provider failures that provokes are protocol-invalid input, not
+        // programming errors. They must surface as [ResponseOutcome.Invalid], never as an
+        // exception that could tear down a consumer's request handler or service loop.
+        val evaluated = try {
+            evaluateResponse(response)
+        } catch (e: Exception) {
+            null
+        } ?: return ResponseOutcome.Invalid
+
+        claim = evaluated.claim
+        transitionTo(AsyncInviteState.CLAIMED)
+        return ResponseOutcome.Claimed(evaluated.shortAuthString, evaluated.joinerFingerprint)
+    }
+
+    private class Evaluated(val claim: Claim, val shortAuthString: String, val joinerFingerprint: ByteArray)
+
+    /** The expensive half of response handling: identity binding, KEM, DH, HKDF, handshake MAC. */
+    private fun evaluateResponse(response: AsyncJoinerResponse): Evaluated? {
+        if (!response.deviceIdentityS.verifyBinding(provider)) return null
 
         val sharedSecret = XWing.decapsulate(provider, inviteXWing.privateKey, response.kemCiphertext)
         val dh1 = AsyncHandshake.contributoryDh(
@@ -121,11 +145,10 @@ class AsyncInviter private constructor(
         val asyncKey = AsyncHandshake.asyncKey(provider, sharedSecret, dh1, transcript)
 
         val expectedJoinerMac = Handshake.mac(provider, asyncKey + secret, transcript, PairingRole.JOINER)
-        if (!response.joinerMac.constantTimeEquals(expectedJoinerMac)) return ResponseOutcome.Invalid
+        if (!response.joinerMac.constantTimeEquals(expectedJoinerMac)) return null
 
-        claim = Claim(asyncKey, transcript, response.deviceIdentityS)
-        transitionTo(AsyncInviteState.CLAIMED)
-        return ResponseOutcome.Claimed(
+        return Evaluated(
+            claim = Claim(asyncKey, transcript, response.deviceIdentityS),
             shortAuthString = AsyncHandshake.shortAuthString(provider, sharedSecret, dh1, transcript),
             joinerFingerprint = InviteLink.fingerprintOf(provider, response.deviceIdentityS),
         )
@@ -145,22 +168,52 @@ class AsyncInviter private constructor(
         AsyncDelivery(inviterMac, log.serialise())
     }
 
-    /** Declines a claimed invite. */
-    fun reject() {
+    /**
+     * Declines a claimed invite. Burns the slot: the terminal transition scrubs the invite's
+     * secrets and store record. Shares [claimLock] with [approve] and [onResponse], so a racing
+     * approve/reject resolves to exactly one outcome.
+     */
+    fun reject(): Unit = claimLock.withLock {
         if (state != AsyncInviteState.CLAIMED) throw PairingException("reject() not in CLAIMED state")
         transitionTo(AsyncInviteState.REJECTED)
     }
 
-    fun masterKey(): ByteArray = masterKey
+    /**
+     * The context master key, as a defensive copy. It deliberately survives terminal
+     * states: the inviter's context may already hold data under this key, so its custody after
+     * the invite ends belongs to the caller, not to this object or the [InviteStore].
+     */
+    fun masterKey(): ByteArray = claimLock.withLock { masterKey.copyOf() }
 
     private fun expire(): ResponseOutcome.Expired {
         transitionTo(AsyncInviteState.EXPIRED)
         return ResponseOutcome.Expired
     }
 
+    /**
+     * The single place state changes, always under [claimLock] and validated against
+     * [ALLOWED_TRANSITIONS] — an impossible step is a protocol bug and throws.
+     *
+     * A terminal transition removes the invite from the store instead of writing it back —
+     * `APPROVED`, `REJECTED`, and `EXPIRED` invites hold nothing worth resuming — and zeroes the
+     * link secret, invite KEM private key, and claimed session key on a best effort, so neither
+     * the store, the aliased [InviteLink.secret], nor a later heap dump keeps a live copy. The
+     * master key is deliberately kept; see [masterKey].
+     */
     private fun transitionTo(next: AsyncInviteState) {
+        if (next !in ALLOWED_TRANSITIONS.getValue(state)) {
+            throw PairingException("Illegal invite transition: $state → $next")
+        }
         state = next
-        store?.put(toPending())
+        if (next in TERMINAL_STATES) {
+            store?.remove(ridAsync.toHexString())
+            secret.fill(0)
+            inviteXWing.privateKey.fill(0)
+            claim?.asyncKey?.fill(0)
+            claim = null
+        } else {
+            store?.put(toPending())
+        }
     }
 
     private fun toPending() = PendingInvite(
@@ -177,7 +230,7 @@ class AsyncInviter private constructor(
         /**
          * Creates an invite: generates the bundle + link, master key, and holds `PENDING`.
          *
-         * The lifetime is bounded **here**, not in UI code (LEP-01): the expiry must lie in the
+         * The lifetime is bounded **here**, not in UI code: the expiry must lie in the
          * future and at most [MAX_LIFETIME_SECONDS] away. `rid_async` hands the relay an offline
          * verifier for the link secret, so an invite's exposure window is a security parameter the
          * library owns, not a preference.
@@ -209,6 +262,17 @@ class AsyncInviter private constructor(
 
         private const val MASTER_KEY_SIZE = 32
         private const val MAC_SIZE = 32
+
+        /** The lifecycle DAG (§2.1): the single source of truth for legal state changes. */
+        private val ALLOWED_TRANSITIONS = mapOf(
+            AsyncInviteState.PENDING to setOf(AsyncInviteState.CLAIMED, AsyncInviteState.EXPIRED),
+            AsyncInviteState.CLAIMED to setOf(AsyncInviteState.APPROVED, AsyncInviteState.REJECTED),
+            AsyncInviteState.APPROVED to emptySet(),
+            AsyncInviteState.REJECTED to emptySet(),
+            AsyncInviteState.EXPIRED to emptySet(),
+        )
+
+        private val TERMINAL_STATES = setOf(AsyncInviteState.APPROVED, AsyncInviteState.REJECTED, AsyncInviteState.EXPIRED)
     }
 }
 
@@ -265,13 +329,32 @@ class AsyncJoiner(
         )
     }
 
-    /** Verifies the delivery and unwraps the master key. */
+    /**
+     * Verifies the delivery and unwraps the master key.
+     *
+     * The MAC gate runs first, so the log parser only ever sees bytes from the authenticated
+     * inviter. Failures past the gate — a malformed log as much as a failed check — surface as
+     * [PairingException], never as a raw parser or provider exception. Success is
+     * one-shot: the session context is scrubbed once the key is recovered.
+     */
     fun onDelivery(delivery: AsyncDelivery) {
         val context = context ?: throw PairingException("onDelivery() before onBundle()")
         if (!delivery.inviterMac.constantTimeEquals(context.expectedInviterMac)) {
             throw PairingException("Inviter MAC mismatch")
         }
 
+        recoveredMasterKey = try {
+            unwrapMasterKey(context, delivery)
+        } catch (e: PairingException) {
+            throw e
+        } catch (e: Exception) {
+            throw PairingException("Malformed delivery")
+        }
+        context.asyncKey.fill(0)
+        this.context = null
+    }
+
+    private fun unwrapMasterKey(context: Context, delivery: AsyncDelivery): ByteArray {
         val log = MembershipLog.deserialise(delivery.serialisedMembershipLog)
         val verification = log.verify(provider)
         if (verification !is MembershipVerification.Valid) throw PairingException("Membership log failed verification: $verification")
@@ -281,10 +364,11 @@ class AsyncJoiner(
 
         val entry = log.addEntryFor(ownKey) ?: throw PairingException("No ADD entry for this device")
         val wrapped = entry.wrappedKeys ?: throw PairingException("No wrapped keys for this device")
-        recoveredMasterKey = Cascade.open(provider, context.asyncKey, wrapped, aad = device.identity.serialise())
+        return Cascade.open(provider, context.asyncKey, wrapped, aad = device.identity.serialise())
     }
 
-    fun masterKey(): ByteArray = recoveredMasterKey ?: throw PairingException("Invite is not complete")
+    /** The recovered context master key, as a defensive copy. */
+    fun masterKey(): ByteArray = recoveredMasterKey?.copyOf() ?: throw PairingException("Invite is not complete")
 
     private companion object {
         const val CLOCK_SKEW_SECONDS = 300L

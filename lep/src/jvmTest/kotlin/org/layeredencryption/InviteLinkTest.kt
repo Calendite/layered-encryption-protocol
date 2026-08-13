@@ -48,8 +48,8 @@ class InviteLinkTest {
 
     @Test
     fun link_rejectsLegacyA1Format() {
-        // A1 carried an 8-byte secret; rid_async gave the relay an offline 64-bit verifier for it
-        // (LEP-01). A1 links must be regenerated, never honoured.
+        // A1 carried an 8-byte secret; rid_async gave the relay an offline 64-bit verifier for it.
+        // A1 links must be regenerated, never honoured.
         assertNull(InviteLink.parse("A1.AAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA"), "legacy A1 link")
         assertNull(InviteLink.parse("A1.${"A".repeat(43)}.AAAAAAAAAAAAAAAAAAAAAA"), "A1 tag with a long secret")
     }

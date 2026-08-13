@@ -23,7 +23,7 @@ import kotlin.test.assertTrue
 
 /**
  * Counts the per-response operations an unauthenticated stranger must not be able to trigger
- * (LEP-01 / LEP-06): the hybrid identity-signature verifies, ML-KEM decapsulation, and X25519.
+ *: the hybrid identity-signature verifies, ML-KEM decapsulation, and X25519.
  */
 private class CountingCryptoProvider(private val delegate: CryptoProvider) : CryptoProvider by delegate {
     var expensiveOps = 0
@@ -283,7 +283,7 @@ class AsyncPairingProtocolTest {
     @Test
     fun async_linkCarriesA256BitSecret() {
         val inviter = inviter()
-        assertEquals(32, inviter.link.secret.size, "the A2 secret must be 256 bits (LEP-01)")
+        assertEquals(32, inviter.link.secret.size, "the A2 secret must be 256 bits")
         assertTrue(inviter.link.fragment().startsWith("A2."))
     }
 }

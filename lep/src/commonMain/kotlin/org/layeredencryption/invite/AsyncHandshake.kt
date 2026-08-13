@@ -35,7 +35,7 @@ object AsyncHandshake {
     private val SAS_INFO = "sas".encodeToByteArray()
 
     /**
-     * The cheap link-possession MAC over a response's public fields (LEP-01 / LEP-06):
+     * The cheap link-possession MAC over a response's public fields:
      *
      * ```
      * linkProofMac = HMAC-SHA256( secret,

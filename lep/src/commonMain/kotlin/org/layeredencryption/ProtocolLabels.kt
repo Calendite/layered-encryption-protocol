@@ -78,9 +78,9 @@ internal object ProtocolLabels {
     /**
      * Async link-possession MAC over a joiner response's public fields.
      *
-     * New with the `A2` link (LEP-01). The inviter verifies this single HMAC before identity
+     * New with the `A2` link. The inviter verifies this single HMAC before identity
      * signatures, ML-KEM decapsulation, and X25519, so only a link holder can make it spend
-     * post-quantum compute on a response (LEP-06).
+     * post-quantum compute on a response.
      */
     const val ASYNC_LINK_AUTH = "v1/async-link-auth"
 
