@@ -40,6 +40,9 @@ object XWing {
     private const val MLKEM768_PUBLIC_SIZE = 1184
     private const val MLKEM768_CIPHERTEXT_SIZE = 1088
 
+    /** Serialised ciphertext size: `mlkem_ct(1088) ‖ x25519_ephemeral_pk(32)`. */
+    const val CIPHERTEXT_SIZE = MLKEM768_CIPHERTEXT_SIZE + X25519_KEY_SIZE
+
     /**
      * The X25519 public component of an X-Wing public key — used by the async invite as the
      * inviter's "signed prekey" for the `dh1` identity binding (Async_Invites_Spec.md §2.5).

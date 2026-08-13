@@ -31,7 +31,39 @@ object AsyncHandshake {
 
     private const val SUFFIX_TRANSCRIPT = ProtocolLabels.TRANSCRIPT_ASYNC
     private const val SUFFIX_PAIRING = ProtocolLabels.PAIRING_ASYNC
+    private const val SUFFIX_LINK_AUTH = ProtocolLabels.ASYNC_LINK_AUTH
     private val SAS_INFO = "sas".encodeToByteArray()
+
+    /**
+     * The cheap link-possession MAC over a response's public fields (LEP-01 / LEP-06):
+     *
+     * ```
+     * linkProofMac = HMAC-SHA256( secret,
+     *                             framed("calendite/v1/async-link-auth" ‖ rid_async
+     *                                    ‖ kemCiphertext ‖ deviceIdentityS) )
+     * ```
+     *
+     * The inviter verifies this single HMAC **before** identity-signature verification, ML-KEM
+     * decapsulation, and X25519, so a stranger who never saw the link cannot make it spend
+     * post-quantum compute. It proves link possession only; the full-handshake `joinerMac`
+     * (keyed by `K_async ‖ secret`) still gates the actual claim.
+     */
+    fun linkProofMac(
+        provider: CryptoProvider,
+        secret: ByteArray,
+        ridAsync: ByteArray,
+        kemCiphertext: ByteArray,
+        deviceIdentityS: DeviceIdentity,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): ByteArray = provider.hmacSha256(
+        secret,
+        FrameWriter()
+            .putBytes(namespace.label(SUFFIX_LINK_AUTH))
+            .putBytes(ridAsync)
+            .putBytes(kemCiphertext)
+            .putBytes(deviceIdentityS.serialise())
+            .toByteArray(),
+    )
 
     fun transcript(
         ridAsync: ByteArray,

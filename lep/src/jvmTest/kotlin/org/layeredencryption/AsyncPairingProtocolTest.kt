@@ -6,10 +6,12 @@ import org.layeredencryption.CryptoProvider
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.identity.DeviceKeys
 import org.layeredencryption.invite.AsyncDelivery
+import org.layeredencryption.invite.AsyncHandshake
 import org.layeredencryption.invite.AsyncInviteState
 import org.layeredencryption.invite.AsyncInviter
 import org.layeredencryption.invite.AsyncJoiner
 import org.layeredencryption.invite.AsyncJoinerResponse
+import org.layeredencryption.invite.AsyncRendezvous
 import org.layeredencryption.invite.InviteBundle
 import org.layeredencryption.invite.ResponseOutcome
 import org.layeredencryption.pairing.PairingException
@@ -19,13 +21,43 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
+/**
+ * Counts the per-response operations an unauthenticated stranger must not be able to trigger
+ * (LEP-01 / LEP-06): the hybrid identity-signature verifies, ML-KEM decapsulation, and X25519.
+ */
+private class CountingCryptoProvider(private val delegate: CryptoProvider) : CryptoProvider by delegate {
+    var expensiveOps = 0
+
+    override fun mlKem768Decapsulate(privateKey: ByteArray, ciphertext: ByteArray): ByteArray {
+        expensiveOps++
+        return delegate.mlKem768Decapsulate(privateKey, ciphertext)
+    }
+
+    override fun x25519(privateKey: ByteArray, peerPublicKey: ByteArray): ByteArray {
+        expensiveOps++
+        return delegate.x25519(privateKey, peerPublicKey)
+    }
+
+    override fun ed25519Verify(publicKey: ByteArray, message: ByteArray, signature: ByteArray): Boolean {
+        expensiveOps++
+        return delegate.ed25519Verify(publicKey, message, signature)
+    }
+
+    override fun mlDsa65Verify(publicKey: ByteArray, message: ByteArray, signature: ByteArray): Boolean {
+        expensiveOps++
+        return delegate.mlDsa65Verify(publicKey, message, signature)
+    }
+}
+
 class AsyncPairingProtocolTest {
 
     private val provider: CryptoProvider = BouncyCastleCryptoProvider()
     private val now = 1_000_000L
     private val expiry = now + 7 * 86_400L
 
-    private fun inviter() = AsyncInviter.create(provider, DeviceKeys.generate(provider), expiry)
+    private fun inviter() =
+        AsyncInviter.create(provider, DeviceKeys.generate(provider), nowEpochSeconds = now, expiryEpochSeconds = expiry)
+
     private fun joiner() = AsyncJoiner(provider, DeviceKeys.generate(provider))
 
     // 1
@@ -57,6 +89,7 @@ class AsyncPairingProtocolTest {
         val tampered = AsyncJoinerResponse(
             response.kemCiphertext,
             response.deviceIdentityS,
+            response.linkProofMac,
             response.joinerMac.copyOf().also { it[0] = (it[0] + 1).toByte() },
         )
         assertEquals(ResponseOutcome.Invalid, inviter.onResponse(tampered, now))
@@ -113,8 +146,11 @@ class AsyncPairingProtocolTest {
     fun async_substitutedJoinerIdentityIsRejected() {
         val inviter = inviter()
         val response = joiner().onBundle(inviter.link, inviter.bundle, now)
-        // Swap in a different (validly-bound) identity ⇒ dh1 + transcript differ ⇒ MAC fails.
-        val substituted = AsyncJoinerResponse(response.kemCiphertext, DeviceKeys.generate(provider).identity, response.joinerMac)
+        // Swap in a different (validly-bound) identity ⇒ the link-proof MAC no longer covers the
+        // fields ⇒ rejected at the cheap gate before any expensive work.
+        val substituted = AsyncJoinerResponse(
+            response.kemCiphertext, DeviceKeys.generate(provider).identity, response.linkProofMac, response.joinerMac,
+        )
         assertEquals(ResponseOutcome.Invalid, inviter.onResponse(substituted, now))
         assertEquals(AsyncInviteState.PENDING, inviter.state)
     }
@@ -124,11 +160,11 @@ class AsyncPairingProtocolTest {
     fun async_nonContributoryDh1IsRejected() {
         // The explicit guard rejects an all-zero secret...
         assertFailsWith<PairingException> {
-            org.layeredencryption.invite.AsyncHandshake.requireContributory(ByteArray(32))
+            AsyncHandshake.requireContributory(ByteArray(32))
         }
         // ...and X25519 against the all-zero (low-order) peer key fails closed, mapped to PairingException.
         assertFailsWith<PairingException> {
-            org.layeredencryption.invite.AsyncHandshake.contributoryDh(provider, provider.randomBytes(32), ByteArray(32))
+            AsyncHandshake.contributoryDh(provider, provider.randomBytes(32), ByteArray(32))
         }
     }
 
@@ -159,7 +195,13 @@ class AsyncPairingProtocolTest {
             real.xWingPublicKey,
             real.bindingSignature.copyOf().also { it[0] = (it[0] + 1).toByte() },
         )
-        val response2 = AsyncJoinerResponse(response.kemCiphertext, tamperedIdentity, response.joinerMac)
+        // Forge a valid link proof over the tampered identity (a link *holder* attacker), so the
+        // rejection specifically exercises the identity-binding verification, not the cheap gate.
+        val forgedProof = AsyncHandshake.linkProofMac(
+            provider, inviter.link.secret, AsyncRendezvous.id(provider, inviter.link.secret),
+            response.kemCiphertext, tamperedIdentity,
+        )
+        val response2 = AsyncJoinerResponse(response.kemCiphertext, tamperedIdentity, forgedProof, response.joinerMac)
         assertEquals(ResponseOutcome.Invalid, inviter.onResponse(response2, now))
     }
 
@@ -178,5 +220,70 @@ class AsyncPairingProtocolTest {
         // Rejecting yields no delivery either.
         inviter.reject()
         assertEquals(AsyncInviteState.REJECTED, inviter.state)
+    }
+
+    // 12
+    @Test
+    fun async_wrongLinkProofIsRejectedBeforeExpensiveCrypto() {
+        val counting = CountingCryptoProvider(provider)
+        val inviter = AsyncInviter.create(counting, DeviceKeys.generate(provider), nowEpochSeconds = now, expiryEpochSeconds = expiry)
+        val response = joiner().onBundle(inviter.link, inviter.bundle, now)
+
+        val tampered = AsyncJoinerResponse(
+            response.kemCiphertext,
+            response.deviceIdentityS,
+            response.linkProofMac.copyOf().also { it[0] = (it[0] + 1).toByte() },
+            response.joinerMac,
+        )
+        counting.expensiveOps = 0
+        assertEquals(ResponseOutcome.Invalid, inviter.onResponse(tampered, now))
+        assertEquals(0, counting.expensiveOps, "a response failing the link-proof gate must not reach signature/KEM/DH work")
+        assertEquals(AsyncInviteState.PENDING, inviter.state)
+
+        // The same response with its genuine link proof spends the expensive work and claims.
+        assertTrue(inviter.onResponse(response, now) is ResponseOutcome.Claimed)
+        assertTrue(counting.expensiveOps > 0)
+    }
+
+    // 13
+    @Test
+    fun async_wrongSizeFieldsAreRejectedBeforeAnyCryptography() {
+        val counting = CountingCryptoProvider(provider)
+        val inviter = AsyncInviter.create(counting, DeviceKeys.generate(provider), nowEpochSeconds = now, expiryEpochSeconds = expiry)
+        val response = joiner().onBundle(inviter.link, inviter.bundle, now)
+
+        counting.expensiveOps = 0
+        val badCiphertext = AsyncJoinerResponse(ByteArray(8), response.deviceIdentityS, response.linkProofMac, response.joinerMac)
+        assertEquals(ResponseOutcome.Invalid, inviter.onResponse(badCiphertext, now))
+        val badLinkProof = AsyncJoinerResponse(response.kemCiphertext, response.deviceIdentityS, ByteArray(5), response.joinerMac)
+        assertEquals(ResponseOutcome.Invalid, inviter.onResponse(badLinkProof, now))
+        val badJoinerMac = AsyncJoinerResponse(response.kemCiphertext, response.deviceIdentityS, response.linkProofMac, ByteArray(5))
+        assertEquals(ResponseOutcome.Invalid, inviter.onResponse(badJoinerMac, now))
+        assertEquals(0, counting.expensiveOps, "malformed responses must be rejected by size checks alone")
+        assertEquals(AsyncInviteState.PENDING, inviter.state)
+    }
+
+    // 14
+    @Test
+    fun async_createEnforcesLifetimeBounds() {
+        val device = DeviceKeys.generate(provider)
+        // Expiry in the past (or right now) is rejected.
+        assertFailsWith<IllegalArgumentException> {
+            AsyncInviter.create(provider, device, nowEpochSeconds = now, expiryEpochSeconds = now)
+        }
+        // Longer than the seven-day maximum is rejected — the library owns this bound, not UI code.
+        assertFailsWith<IllegalArgumentException> {
+            AsyncInviter.create(provider, device, nowEpochSeconds = now, expiryEpochSeconds = now + AsyncInviter.MAX_LIFETIME_SECONDS + 1)
+        }
+        // Exactly the maximum is allowed.
+        AsyncInviter.create(provider, device, nowEpochSeconds = now, expiryEpochSeconds = now + AsyncInviter.MAX_LIFETIME_SECONDS)
+    }
+
+    // 15
+    @Test
+    fun async_linkCarriesA256BitSecret() {
+        val inviter = inviter()
+        assertEquals(32, inviter.link.secret.size, "the A2 secret must be 256 bits (LEP-01)")
+        assertTrue(inviter.link.fragment().startsWith("A2."))
     }
 }

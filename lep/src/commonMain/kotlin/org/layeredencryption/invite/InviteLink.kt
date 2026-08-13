@@ -9,29 +9,35 @@ import kotlin.io.encoding.ExperimentalEncodingApi
  * The async invite link (Async_Invites_Spec.md §2.2):
  *
  * ```
- * https://calendite.com/join#A1.<secret>.<fp>
+ * https://calendite.com/join#A2.<secret>.<fp>
  * ```
  *
- * - `A1` — async-invite v1 tag (disambiguates from live-code links).
- * - `secret` — 8 CSPRNG bytes, base64url unpadded (11 chars).
+ * - `A2` — async-invite v2 tag (disambiguates from live-code links).
+ * - `secret` — 32 CSPRNG bytes, base64url unpadded (43 chars).
  * - `fp` — first 16 bytes of `SHA-256(ed25519_pk_A)`, base64url unpadded (22 chars). Pins the
  *   inviter's identity so a relay that swaps the bundle is caught (§2.7 step 2).
+ *
+ * `A2` replaces the 8-byte-secret `A1` format (LEP-01). `rid_async` is a hash of the secret that
+ * the relay necessarily sees, which makes it an **offline** verifier for secret guesses: at 64 bits
+ * a GPU farm could cover the keyspace within an invite's lifetime. At 256 bits the same attack is
+ * out of reach, and the secret travels in a link/QR code so the extra length costs nothing.
+ * `A1` links no longer parse; any pending ones must be regenerated.
  *
  * The whole payload lives in the URL **fragment**, so it never reaches any web server (design §6.4).
  * Parsing is strict: exact tag, exact field count, exact decoded lengths — anything else is rejected.
  */
 class InviteLink(val secret: ByteArray, val fingerprint: ByteArray) {
 
-    /** The `A1.<secret>.<fp>` fragment payload (without the URL prefix). */
+    /** The `A2.<secret>.<fp>` fragment payload (without the URL prefix). */
     fun fragment(): String = "$TAG.${b64(secret)}.${b64(fingerprint)}"
 
     /** The full shareable URL. */
     fun url(): String = "$URL_PREFIX${fragment()}"
 
     companion object {
-        const val TAG = "A1"
+        const val TAG = "A2"
+        const val SECRET_SIZE = 32
         private const val URL_PREFIX = "https://calendite.com/join#"
-        private const val SECRET_SIZE = 8
         private const val FINGERPRINT_SIZE = 16
 
         /** Builds a link for a fresh [secret] and the inviter's identity (fingerprint derived here). */
@@ -44,7 +50,11 @@ class InviteLink(val secret: ByteArray, val fingerprint: ByteArray) {
         fun fingerprintOf(provider: CryptoProvider, identity: DeviceIdentity): ByteArray =
             provider.sha256(identity.signingPublicKey).copyOfRange(0, FINGERPRINT_SIZE)
 
-        /** Strictly parses a fragment payload (`A1.<secret>.<fp>`), or returns `null` if malformed. */
+        /**
+         * Strictly parses a fragment payload (`A2.<secret>.<fp>`), or returns `null` if malformed.
+         * Legacy `A1` links are rejected here by the tag check — their 64-bit secrets are
+         * brute-forceable offline (LEP-01) and must not be honoured.
+         */
         fun parse(fragment: String): InviteLink? {
             val body = fragment.substringAfter('#', fragment) // tolerate a full URL or bare fragment
             val parts = body.split('.')

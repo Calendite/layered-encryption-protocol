@@ -75,6 +75,15 @@ internal object ProtocolLabels {
     /** Async pairing master-key derivation. */
     const val PAIRING_ASYNC = "v1/pairing-async"
 
+    /**
+     * Async link-possession MAC over a joiner response's public fields.
+     *
+     * New with the `A2` link (LEP-01). The inviter verifies this single HMAC before identity
+     * signatures, ML-KEM decapsulation, and X25519, so only a link holder can make it spend
+     * post-quantum compute on a response (LEP-06).
+     */
+    const val ASYNC_LINK_AUTH = "v1/async-link-auth"
+
     /** Rendezvous identifier for in-person pairing. */
     const val RENDEZVOUS = "rendezvous/v1"
 
@@ -99,7 +108,7 @@ internal object ProtocolLabels {
     val ALL: Set<String> = setOf(
         LAYER_CHACHA, LAYER_AES, TRANSCRIPT, PAIRING, CODE_SECRET, SAS_COMMITMENT, DEVICE_IDENTITY,
         MEMBER_KEY_WRAP,
-        MEMBERSHIP, INVITE_BUNDLE, TRANSCRIPT_ASYNC, PAIRING_ASYNC, RENDEZVOUS,
+        MEMBERSHIP, INVITE_BUNDLE, TRANSCRIPT_ASYNC, PAIRING_ASYNC, ASYNC_LINK_AUTH, RENDEZVOUS,
         RENDEZVOUS_ASYNC, CONTEXT_ID,
     )
 }

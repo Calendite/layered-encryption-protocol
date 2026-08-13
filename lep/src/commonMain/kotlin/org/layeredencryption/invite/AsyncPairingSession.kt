@@ -21,8 +21,17 @@ enum class AsyncInviteState { PENDING, CLAIMED, APPROVED, REJECTED, EXPIRED }
 
 // ── Wire messages (§2.4) ──────────────────────────────────────────────────────────────────────
 
-/** Posted by the joiner S at `rid_async`; gated on link possession by [joinerMac]. */
-class AsyncJoinerResponse(val kemCiphertext: ByteArray, val deviceIdentityS: DeviceIdentity, val joinerMac: ByteArray)
+/**
+ * Posted by the joiner S at `rid_async`; gated on link possession twice: [linkProofMac] is the
+ * cheap pre-authentication gate the inviter checks before any expensive cryptography (LEP-01 /
+ * LEP-06), and [joinerMac] binds the full handshake once the key agreement has run.
+ */
+class AsyncJoinerResponse(
+    val kemCiphertext: ByteArray,
+    val deviceIdentityS: DeviceIdentity,
+    val linkProofMac: ByteArray,
+    val joinerMac: ByteArray,
+)
 
 /** Emitted by the inviter A **only** from `approve()`: the master key inside a signed membership log. */
 class AsyncDelivery(val inviterMac: ByteArray, val serialisedMembershipLog: ByteArray)
@@ -86,6 +95,20 @@ class AsyncInviter private constructor(
         if (state == AsyncInviteState.EXPIRED) return ResponseOutcome.Expired
         if (state != AsyncInviteState.PENDING) return ResponseOutcome.AlreadyClaimed
         if (nowEpochSeconds > expiryEpochSeconds) return expire()
+
+        // Exact sizes before any cryptography (LEP-06): malformed responses cost nothing.
+        if (response.kemCiphertext.size != XWing.CIPHERTEXT_SIZE) return ResponseOutcome.Invalid
+        if (response.linkProofMac.size != MAC_SIZE) return ResponseOutcome.Invalid
+        if (response.joinerMac.size != MAC_SIZE) return ResponseOutcome.Invalid
+
+        // The cheap link-possession gate (LEP-01 / LEP-06): one HMAC, verified before the hybrid
+        // identity signatures, ML-KEM decapsulation, and X25519 below. A responder who never saw
+        // the link stops here without making us spend post-quantum compute.
+        val expectedLinkProof = AsyncHandshake.linkProofMac(
+            provider, secret, ridAsync, response.kemCiphertext, response.deviceIdentityS,
+        )
+        if (!response.linkProofMac.constantTimeEquals(expectedLinkProof)) return ResponseOutcome.Invalid
+
         if (!response.deviceIdentityS.verifyBinding(provider)) return ResponseOutcome.Invalid
 
         val sharedSecret = XWing.decapsulate(provider, inviteXWing.privateKey, response.kemCiphertext)
@@ -151,14 +174,26 @@ class AsyncInviter private constructor(
     )
 
     companion object {
-        /** Creates an invite: generates the bundle + link, master key, and holds `PENDING`. */
+        /**
+         * Creates an invite: generates the bundle + link, master key, and holds `PENDING`.
+         *
+         * The lifetime is bounded **here**, not in UI code (LEP-01): the expiry must lie in the
+         * future and at most [MAX_LIFETIME_SECONDS] away. `rid_async` hands the relay an offline
+         * verifier for the link secret, so an invite's exposure window is a security parameter the
+         * library owns, not a preference.
+         */
         fun create(
             provider: CryptoProvider,
             device: DeviceKeys,
+            nowEpochSeconds: Long,
             expiryEpochSeconds: Long,
             store: InviteStore? = null,
         ): AsyncInviter {
-            val secret = provider.randomBytes(SECRET_SIZE)
+            require(expiryEpochSeconds > nowEpochSeconds) { "Invite expiry must be in the future" }
+            require(expiryEpochSeconds - nowEpochSeconds <= MAX_LIFETIME_SECONDS) {
+                "Invite lifetime must be at most $MAX_LIFETIME_SECONDS seconds"
+            }
+            val secret = provider.randomBytes(InviteLink.SECRET_SIZE)
             val ridAsync = AsyncRendezvous.id(provider, secret)
             val inviteXWing = XWing.generateKeyPair(provider)
             val masterKey = provider.randomBytes(MASTER_KEY_SIZE)
@@ -169,8 +204,11 @@ class AsyncInviter private constructor(
             return inviter
         }
 
-        private const val SECRET_SIZE = 8
+        /** The longest an async invite may stay live: seven days. */
+        const val MAX_LIFETIME_SECONDS = 7 * 86_400L
+
         private const val MASTER_KEY_SIZE = 32
+        private const val MAC_SIZE = 32
     }
 }
 
@@ -219,8 +257,12 @@ class AsyncJoiner(
             asyncKey = asyncKey,
             expectedInviterMac = Handshake.mac(provider, asyncKey + link.secret, transcript, PairingRole.INVITER),
         )
-        val joinerMac = Handshake.mac(provider, asyncKey + link.secret, transcript, PairingRole.JOINER)
-        return AsyncJoinerResponse(encapsulation.ciphertext, device.identity, joinerMac)
+        return AsyncJoinerResponse(
+            kemCiphertext = encapsulation.ciphertext,
+            deviceIdentityS = device.identity,
+            linkProofMac = AsyncHandshake.linkProofMac(provider, link.secret, ridAsync, encapsulation.ciphertext, device.identity),
+            joinerMac = Handshake.mac(provider, asyncKey + link.secret, transcript, PairingRole.JOINER),
+        )
     }
 
     /** Verifies the delivery and unwraps the master key. */

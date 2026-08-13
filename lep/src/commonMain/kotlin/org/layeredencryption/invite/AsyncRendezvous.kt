@@ -11,8 +11,12 @@ import org.layeredencryption.CryptoProvider
  * rid_async = SHA-256( "calendite/rendezvous-async/v1" ‖ secret_bytes )
  * ```
  *
- * The distinct label guarantees async slots can never collide with live-code slots. Like the live
- * `rid`, it is a hash of the secret, so it reveals nothing and enumeration is online-only.
+ * The distinct label guarantees async slots can never collide with live-code slots.
+ *
+ * Hashing hides the secret from anyone who has not seen the link, but `rid_async` itself is an
+ * **offline** verifier: the relay sees it and can test candidate secrets locally, with no rate
+ * limit or interaction (LEP-01). Security therefore rests entirely on the secret's entropy —
+ * 256 bits in the `A2` link, after the 64-bit `A1` secret proved searchable at GPU-farm scale.
  */
 object AsyncRendezvous {
 

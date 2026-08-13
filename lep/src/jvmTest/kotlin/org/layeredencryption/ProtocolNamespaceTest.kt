@@ -45,6 +45,9 @@ class ProtocolNamespaceTest {
         "v2/invite-bundle" to "calendite/v2/invite-bundle",
         "v1/transcript-async" to "calendite/v1/transcript-async",
         "v1/pairing-async" to "calendite/v1/pairing-async",
+        // New with the A2 invite link (LEP-01): keys the cheap link-possession MAC the inviter
+        // checks before doing any expensive cryptography on an async response.
+        "v1/async-link-auth" to "calendite/v1/async-link-auth",
         "rendezvous/v1" to "calendite/rendezvous/v1",
         "rendezvous-async/v1" to "calendite/rendezvous-async/v1",
         // Was "calendar-id/v1" for a long time, and the odd spelling was kept deliberately: a
