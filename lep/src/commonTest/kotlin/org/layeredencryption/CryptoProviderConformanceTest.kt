@@ -27,6 +27,22 @@ class CryptoProviderConformanceTest {
 
     private val provider: CryptoProvider? = runCatching { platformCryptoProvider() }.getOrNull()
 
+    /**
+     * The self-skip, made loud (LEP-08f): on a platform whose provider is a throwing stub (iOS
+     * today), every test in this suite silently verifies nothing. This test exists so that state
+     * appears in the test *report* instead of hiding behind an innocent green run — its output
+     * says exactly what green means here. CI must not count a self-skipping platform as a
+     * verified crypto target; that enforcement is the required-checks work (LEP-08h).
+     */
+    @Test
+    fun platformProviderStatus_greenMeansNothingHereIfThisReportsASkip() {
+        if (provider == null) {
+            println("CONFORMANCE SELF-SKIP: no CryptoProvider on this platform — this suite verified NO cryptography")
+        } else {
+            println("Conformance suite active: ${provider::class.simpleName}")
+        }
+    }
+
     // ── Hashes & MACs ─────────────────────────────────────────────────────────────────────────
 
     /** NIST SHA-256 known answer for "abc". */

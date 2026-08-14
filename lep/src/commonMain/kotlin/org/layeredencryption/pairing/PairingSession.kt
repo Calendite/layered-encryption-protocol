@@ -113,6 +113,20 @@ class ExistingCalendar(
  * log rather than founding a new one. Any active member may do this: verification requires only
  * that the signer was a member at that point in the chain, not that they founded it.
  */
+/**
+ * Opaque, non-forgeable proof that the human SAS comparison was confirmed on a specific session.
+ *
+ * Its constructor is `internal`, so a consumer cannot fabricate one; a session issues exactly one,
+ * from [Inviter.confirmSas] / [Joiner.confirmSas], and only after that side's code-keyed MAC — and
+ * on the joiner, the SAS commitment — have already been verified. [Inviter.complete] and
+ * [Joiner.onInviterComplete] require and validate it, so the master key cannot be released without
+ * passing the human gate, even by a consumer driving the low-level session API directly rather than
+ * through [PairingFerry]. The token is bound to its issuing session and consumed once.
+ */
+class SasConfirmation internal constructor(internal val session: Any)
+
+private enum class InviterStage { AWAITING_HELLO, AWAITING_RESPONSE, AWAITING_SAS, SAS_CONFIRMED, COMPLETED }
+
 class Inviter(
     private val provider: CryptoProvider,
     private val device: DeviceKeys,
@@ -120,6 +134,7 @@ class Inviter(
     private val existing: ExistingCalendar? = null,
 ) {
     private val xWingKeyPair = XWing.generateKeyPair(provider)
+    private var stage = InviterStage.AWAITING_HELLO
 
     /**
      * Chosen up front and committed to in [hello], revealed only in the confirm. Fixing it before
@@ -165,14 +180,20 @@ class Inviter(
         check(!destroyed) { "Pairing session has been destroyed" }
     }
 
-    fun hello(): InviterHello {
+    private fun requireStage(vararg allowed: InviterStage) {
         checkLive()
+        if (stage !in allowed) throw PairingException("Out-of-order pairing step: stage is $stage")
+    }
+
+    fun hello(): InviterHello {
+        requireStage(InviterStage.AWAITING_HELLO, InviterStage.AWAITING_RESPONSE) // resend is allowed
+        stage = InviterStage.AWAITING_RESPONSE
         return InviterHello(xWingKeyPair.publicKey, device.identity, Handshake.sasCommitment(provider, sasNonce))
     }
 
     /** Verifies the joiner's code-keyed MAC and returns the inviter's own MAC. Throws on mismatch. */
     fun onJoinerResponse(response: JoinerResponse): InviterConfirm {
-        checkLive()
+        requireStage(InviterStage.AWAITING_RESPONSE)
         if (!response.joinerDeviceIdentity.verifyBinding(provider)) {
             throw PairingException("Joiner device-identity binding is invalid")
         }
@@ -195,6 +216,7 @@ class Inviter(
         this.handshakeKey = handshakeKey
         this.joinerDeviceIdentity = response.joinerDeviceIdentity
         this.shortAuthString = Handshake.shortAuthString(provider, sharedSecret, transcript, sasNonce)
+        stage = InviterStage.AWAITING_SAS
         return InviterConfirm(
             Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.INVITER),
             sasNonce,
@@ -202,11 +224,25 @@ class Inviter(
     }
 
     /**
-     * Call only after the human SAS comparison matches. Wraps the master key for the joiner.
+     * Records that this device's human confirmed the displayed SAS matches, and returns the
+     * [SasConfirmation] that [complete] requires. Only callable once the SAS is available — i.e.
+     * after [onJoinerResponse] has verified the joiner's code-keyed MAC — so a token cannot exist
+     * without the MAC check having passed.
+     */
+    fun confirmSas(): SasConfirmation {
+        requireStage(InviterStage.AWAITING_SAS)
+        stage = InviterStage.SAS_CONFIRMED
+        return SasConfirmation(this)
+    }
+
+    /**
+     * Wraps the master key for the joiner. Requires the [SasConfirmation] from [confirmSas] — the
+     * key is never released without the human gate, and the token is bound to this session.
      * Success is terminal: the session scrubs its handshake secrets on the way out.
      */
-    fun complete(): InviterComplete {
-        checkLive()
+    fun complete(confirmation: SasConfirmation): InviterComplete {
+        requireStage(InviterStage.SAS_CONFIRMED)
+        if (confirmation.session !== this) throw PairingException("SAS confirmation belongs to a different session")
         val joiner = joinerDeviceIdentity ?: throw PairingException("complete() called before a joiner response")
         val handshakeKey = handshakeKey ?: throw PairingException("complete() called before the handshake")
         val wrappedMasterKey = Cascade.seal(provider, handshakeKey, keys.serialise(), aad = joiner.serialise())
@@ -215,6 +251,7 @@ class Inviter(
         val log = base.append(provider, MembershipOp.ADD, joiner, wrappedMasterKey, signer = device.signingKeyPair)
         membershipLog = log
         val message = InviterComplete(log.serialise())
+        stage = InviterStage.COMPLETED
         destroy()
         return message
     }
@@ -240,11 +277,14 @@ class Inviter(
  * MAC ([onInviterHello]), verifies the inviter's MAC ([onInviterConfirm]) and — after the human SAS
  * comparison — verifies the membership log and unwraps the master key ([onInviterComplete]).
  */
+private enum class JoinerStage { AWAITING_HELLO, AWAITING_CONFIRM, AWAITING_SAS, SAS_CONFIRMED, COMPLETED }
+
 class Joiner(
     private val provider: CryptoProvider,
     private val device: DeviceKeys,
     private val code: PairingCode,
 ) {
+    private var stage = JoinerStage.AWAITING_HELLO
     private var handshakeKey: ByteArray? = null
     private var expectedInviterMac: ByteArray? = null
     private var recoveredKeys: EpochKeys? = null
@@ -277,6 +317,11 @@ class Joiner(
         check(!destroyed) { "Pairing session has been destroyed" }
     }
 
+    private fun requireStage(vararg allowed: JoinerStage) {
+        checkLive()
+        if (stage !in allowed) throw PairingException("Out-of-order pairing step: stage is $stage")
+    }
+
     /**
      * The 6-digit SAS to show the user, available only once [onInviterConfirm] has run.
      *
@@ -288,7 +333,7 @@ class Joiner(
 
     /** Encapsulates against the inviter's key and returns the joiner's response with its MAC. */
     fun onInviterHello(hello: InviterHello): JoinerResponse {
-        checkLive()
+        requireStage(JoinerStage.AWAITING_HELLO)
         if (!hello.inviterDeviceIdentity.verifyBinding(provider)) {
             throw PairingException("Inviter device-identity binding is invalid")
         }
@@ -309,6 +354,7 @@ class Joiner(
         this.transcript = transcript
         this.expectedInviterMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.INVITER)
         val joinerMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.JOINER)
+        stage = JoinerStage.AWAITING_CONFIRM
         return JoinerResponse(encapsulation.ciphertext, device.identity, joinerMac)
     }
 
@@ -317,7 +363,7 @@ class Joiner(
      * from the hello, and only then derives the SAS. Throws on any mismatch.
      */
     fun onInviterConfirm(confirm: InviterConfirm) {
-        checkLive()
+        requireStage(JoinerStage.AWAITING_CONFIRM)
         val expected = expectedInviterMac ?: throw PairingException("onInviterConfirm() called before the handshake")
         if (!confirm.inviterMac.constantTimeEquals(expected)) {
             throw PairingException("Inviter MAC mismatch — wrong code or man-in-the-middle")
@@ -329,14 +375,30 @@ class Joiner(
         val sharedSecret = sharedSecret ?: throw PairingException("onInviterConfirm() called before the handshake")
         val transcript = transcript ?: throw PairingException("onInviterConfirm() called before the handshake")
         shortAuthString = Handshake.shortAuthString(provider, sharedSecret, transcript, confirm.sasNonce)
+        stage = JoinerStage.AWAITING_SAS
     }
 
     /**
-     * Call only after the human SAS comparison matches. Verifies the log and unwraps the master
-     * key. Success is terminal: the session scrubs its handshake secrets on the way out.
+     * Records that this device's human confirmed the displayed SAS matches, and returns the
+     * [SasConfirmation] that [onInviterComplete] requires. Only callable once the SAS is available
+     * — i.e. after [onInviterConfirm] has verified the inviter's MAC and opened the commitment —
+     * so the human gate cannot be skipped by jumping straight to completion.
      */
-    fun onInviterComplete(complete: InviterComplete) {
-        checkLive()
+    fun confirmSas(): SasConfirmation {
+        requireStage(JoinerStage.AWAITING_SAS)
+        stage = JoinerStage.SAS_CONFIRMED
+        return SasConfirmation(this)
+    }
+
+    /**
+     * Verifies the log and unwraps the master key. Requires the [SasConfirmation] from
+     * [confirmSas] — the master key is never accepted without the human gate, so a MITM that
+     * substituted its own hello cannot get this device to accept the attacker's chosen key by
+     * skipping the confirm step. Success is terminal: the session scrubs its secrets on the way out.
+     */
+    fun onInviterComplete(complete: InviterComplete, confirmation: SasConfirmation) {
+        requireStage(JoinerStage.SAS_CONFIRMED)
+        if (confirmation.session !== this) throw PairingException("SAS confirmation belongs to a different session")
         val handshakeKey = handshakeKey ?: throw PairingException("onInviterComplete() called before the handshake")
         val log = MembershipLog.deserialise(complete.membershipLog)
 
@@ -355,6 +417,7 @@ class Joiner(
         recoveredKeys = EpochKeys.deserialise(unwrapped)
             ?: throw PairingException("The wrapped keys did not decode")
         membershipLog = log
+        stage = JoinerStage.COMPLETED
         destroy()
     }
 

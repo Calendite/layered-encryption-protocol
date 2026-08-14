@@ -136,6 +136,10 @@ class LaneEnvelope(
      * Opens this envelope, verifying both cascade tags and the header binding, and returns the
      * plaintext bytes. Throws [CryptoException] on tamper — there is no path that returns
      * unauthenticated bytes.
+     *
+     * This is the *stateless* open: it proves the envelope was never modified, and nothing else.
+     * A previously valid envelope replayed by a relay opens here happily. Consumers reading from
+     * an untrusted transport should use [openAndValidate], which also proves it is *new*.
      */
     fun open(
         provider: CryptoProvider,
@@ -146,5 +150,55 @@ class LaneEnvelope(
             "No key for epoch $epoch: this device was added after that rotation",
         )
         return Cascade.open(provider, key, _ciphertext, aad = associatedData(), namespace = namespace)
+    }
+
+    /**
+     * The stateful open (LEP-04): everything [open] does, plus proof of freshness against the
+     * caller's expectations and the lane's accepted watermark.
+     *
+     * Rejected with [ReplayException], in order, before any decryption:
+     * 1. a header naming a different [expectedContextId] or [expectedLane] — AEAD binds the
+     *    header to the ciphertext, but only the caller knows which lane it *meant* to read;
+     * 2. a `(seq, epoch)` the [freshness] store would refuse — replays, duplicate or regressed
+     *    sequences, and retired epochs die at header-read cost, before the cascade runs.
+     *
+     * Only after the AEAD tags verify is the watermark advanced, atomically — recording before
+     * authentication would let unauthenticated garbage with a high sequence number burn the
+     * lane's sequences and suppress real operations. The consequence is documented honestly: a
+     * crash between decryption and recording can re-deliver one operation after restart, so
+     * consumers should be idempotent per `(lane, seq)`; the alternative — at-most-once via
+     * record-first — hands a denial-of-service primitive to anyone who can send bytes.
+     *
+     * What this deliberately does not decide: whether a sequence *gap* is relay suppression or
+     * ordinary not-yet-delivered reordering, and whether the lane's author is still an active
+     * member — adopt membership via `MembershipLog.reconcile` and check
+     * `activeIdentities` before honouring a lane; both remain the consumer's synchronisation
+     * policy, stated here so the boundary is explicit rather than implied.
+     */
+    fun openAndValidate(
+        provider: CryptoProvider,
+        keys: EpochKeys,
+        expectedContextId: String,
+        expectedLane: String,
+        freshness: FreshnessStore,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): ByteArray {
+        if (contextId != expectedContextId) {
+            throw ReplayException("Envelope is for context '$contextId', expected '$expectedContextId'")
+        }
+        if (lane != expectedLane) {
+            throw ReplayException("Envelope is for lane '$lane', expected '$expectedLane'")
+        }
+        if (!freshness.wouldAccept(contextId, lane, seq, epoch)) {
+            throw ReplayException("Stale envelope for lane '$lane': seq=$seq epoch=$epoch is not fresh")
+        }
+
+        val plaintext = open(provider, keys, namespace)
+
+        if (!freshness.accept(contextId, lane, seq, epoch)) {
+            // Lost an atomic race to a concurrent open of the same (lane, seq): a replay.
+            throw ReplayException("Envelope for lane '$lane' seq=$seq was concurrently accepted")
+        }
+        return plaintext
     }
 }

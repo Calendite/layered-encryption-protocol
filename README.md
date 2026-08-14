@@ -83,19 +83,28 @@ val provider = platformCryptoProvider()          // Bouncy Castle on JVM/Android
 val sealed = Cascade.seal(provider, masterKey, plaintext = myBytes, aad = context)
 val opened = Cascade.open(provider, masterKey, sealed, aad = context)
 
-// Or use the envelope, which binds a header (calendar, lane, sequence) into the ciphertext so a
-// relay cannot re-label a message without decryption failing.
-val envelope = LaneEnvelope.seal(provider, masterKey, contextId, lane, seq, plaintext = myBytes)
-val bytes = envelope.open(provider, masterKey)   // throws on tamper; never returns unverified data
+// Or use the envelope, which binds a header (context, lane, sequence, epoch) into the ciphertext
+// so a relay cannot re-label a message without decryption failing. Envelopes take the context's
+// EpochKeys — every key the context has had — so old epochs stay readable after rotations.
+val keys = EpochKeys.founding(masterKey)
+val envelope = LaneEnvelope.seal(provider, keys, contextId, lane, seq, plaintext = myBytes)
+val bytes = envelope.open(provider, keys)        // throws on tamper; never returns unverified data
 ```
 
 Pairing, over any channel that can send and receive byte frames:
 
 ```kotlin
-// One device hosts, the other joins. Both humans compare the same six-word string and confirm.
-val result = PairingFerry.host(channel, inviter, confirmSas = { sas -> ui.askUser(sas) })
-val result = PairingFerry.join(channel, joiner, confirmSas = { sas -> ui.askUser(sas) })
+// One device invites, the other joins. Both humans compare the same six-digit string and
+// confirm; the ferry releases the master key only after both confirmations.
+val masterKey = PairingFerry.runInviter(channel, inviter, confirmSas = { sas -> ui.askUser(sas) })
+val masterKey = PairingFerry.runJoiner(channel, joiner, confirmSas = { sas -> ui.askUser(sas) })
 ```
+
+`PairingFerry` is the safe facade, and using it is the recommended path: it drives the ceremony in
+order and gates key release on both humans. If you drive the low-level `Inviter`/`Joiner` sessions
+directly instead, they enforce the same order themselves — every step checks its prerequisite, and
+`complete()`/`onInviterComplete()` require the `SasConfirmation` token that `confirmSas()` issues
+only after the SAS has been verified, so the human gate cannot be skipped.
 
 Implement `FrameChannel` over whatever you have — a socket, a WebSocket, a relay, a Bluetooth
 link. The library provides the length codec (`intToBytes` / `bytesToInt`) so your framing agrees
@@ -130,9 +139,9 @@ existing pairing.
 | Target | Status |
 | --- | --- |
 | JVM | Full (Bouncy Castle) |
-| Android | Full (Bouncy Castle) |
-| iOS | Declared, not implemented — CryptoKit binding is future work |
-| wasmJs | Declared, not implemented — WebCrypto + libsodium.js is future work |
+| Android | Full (Bouncy Castle); minSdk 28 — the platform's ChaCha20-Poly1305 starts there |
+| iOS | Declared, not implemented — CryptoKit binding is future work. The conformance suite **self-skips** here: a green iOS build verifies no cryptography |
+| wasmJs | Full (noble: `@noble/hashes`, `ciphers`, `curves`, `post-quantum`); the conformance and X-Wing KAT suites run in a real browser |
 
 The JVM and Android targets share one implementation, so the whole protocol suite runs on a
 laptop without a device or an emulator.

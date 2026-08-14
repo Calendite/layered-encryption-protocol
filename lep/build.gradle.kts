@@ -1,7 +1,6 @@
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.androidLibrary)
-    alias(libs.plugins.kotlinSerialization)
     `maven-publish`
 }
 
@@ -28,10 +27,10 @@ kotlin {
         androidMain.get().dependsOn(jvmCommonMain)
         jvmMain.get().dependsOn(jvmCommonMain)
 
-        commonMain.dependencies {
-            implementation(libs.kotlinx.serialization.json)
-            implementation(libs.kotlinx.coroutines.core)
-        }
+        // Production code has NO dependencies beyond the Kotlin stdlib and, per JVM-family
+        // target, Bouncy Castle. kotlinx-serialization and coroutines were once declared here
+        // unused — every dependency in a crypto library's main source set is attack surface, so
+        // additions need a use, not the other way around (LEP-08d).
         commonTest.dependencies {
             implementation(kotlin("test"))
         }

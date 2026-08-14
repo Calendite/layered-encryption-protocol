@@ -1,19 +1,18 @@
 [versions]
 kotlin = "2.3.20"
 agp = "8.13.2"
-bouncycastle = "1.81"
-kotlinxSerialization = "1.7.3"
+bouncycastle = "1.85.2"
 kotlinxCoroutines = "1.8.0"
 androidCompileSdk = "35"
-androidMinSdk = "24"
+# 28, not lower: the JVM/Android provider takes ChaCha20-Poly1305 from JCA, which Android ships
+# from API 28. A lower minSdk would compile but throw NoSuchAlgorithmException on first seal on
+# API 24-27 devices (LEP-08f). Supporting those would mean a second, divergent cipher path.
+androidMinSdk = "28"
 
 [libraries]
 bouncycastle-provider = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
-kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
-kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutines" }
 
 [plugins]
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
 androidLibrary = { id = "com.android.library", version.ref = "agp" }
-kotlinSerialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

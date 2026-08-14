@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 
 include(":lep")
 include(":playground")
+include(":fuzz")

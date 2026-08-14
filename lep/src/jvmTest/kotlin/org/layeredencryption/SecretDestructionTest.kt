@@ -83,11 +83,11 @@ class SecretDestructionTest {
         val response = joiner.onInviterHello(inviter.hello())
         val confirm = inviter.onJoinerResponse(response)
         joiner.onInviterConfirm(confirm)
-        joiner.onInviterComplete(inviter.complete()) // success is terminal on both sides
+        joiner.onInviterComplete(inviter.complete(inviter.confirmSas()), joiner.confirmSas()) // terminal on both sides
 
         // Further protocol steps are dead...
         assertFailsWith<IllegalStateException> { inviter.hello() }
-        assertFailsWith<IllegalStateException> { inviter.complete() }
+        assertFailsWith<IllegalStateException> { inviter.confirmSas() }
         assertFailsWith<IllegalStateException> { joiner.onInviterConfirm(confirm) }
 
         // ...but the ceremony's results belong to the application and survive.

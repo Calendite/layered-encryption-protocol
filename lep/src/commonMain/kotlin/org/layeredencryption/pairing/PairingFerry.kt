@@ -41,9 +41,10 @@ object PairingFerry {
 
             val sas = inviter.shortAuthString ?: throw PairingException("SAS unavailable after handshake")
             if (!confirmSas(sas)) throw PairingException("SAS rejected on the inviting device")
+            val confirmation = inviter.confirmSas() // the human gate: issues the token complete() requires
             PairingWire.decodeSasConfirmed(channel.receive()) // the joiner's human confirmed too
 
-            channel.send(PairingWire.encode(inviter.complete()))
+            channel.send(PairingWire.encode(inviter.complete(confirmation)))
             return inviter.masterKey()
         } finally {
             // Terminal on every path: success already scrubbed inside complete() (idempotent),
@@ -68,9 +69,10 @@ object PairingFerry {
 
             val sas = joiner.shortAuthString ?: throw PairingException("SAS unavailable after handshake")
             if (!confirmSas(sas)) throw PairingException("SAS rejected on the joining device")
+            val confirmation = joiner.confirmSas() // the human gate: issues the token onInviterComplete() requires
             channel.send(PairingWire.encodeSasConfirmed())
 
-            joiner.onInviterComplete(PairingWire.decodeInviterComplete(channel.receive()))
+            joiner.onInviterComplete(PairingWire.decodeInviterComplete(channel.receive()), confirmation)
             return joiner.masterKey()
         } finally {
             // Terminal on every path, mirroring the inviter side.

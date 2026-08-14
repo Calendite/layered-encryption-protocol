@@ -180,7 +180,7 @@ class PairingProtocolTest {
         assertEquals(inviter.shortAuthString, joiner.shortAuthString)
 
         // Humans confirm → keys are exchanged.
-        joiner.onInviterComplete(inviter.complete())
+        joiner.onInviterComplete(inviter.complete(inviter.confirmSas()), joiner.confirmSas())
         assertContentEquals(inviter.masterKey(), joiner.masterKey())
 
         // Proof the shared key actually works: seal on one side, open on the other.

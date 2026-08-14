@@ -29,7 +29,7 @@ class MultiMemberTest {
     private fun pair(inviter: Inviter, joiner: Joiner): Joiner {
         val response = joiner.onInviterHello(inviter.hello())
         joiner.onInviterConfirm(inviter.onJoinerResponse(response))
-        joiner.onInviterComplete(inviter.complete())
+        joiner.onInviterComplete(inviter.complete(inviter.confirmSas()), joiner.confirmSas())
         return joiner
     }
 
