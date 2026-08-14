@@ -182,15 +182,25 @@ class DeviceKeys(
     }
 
     companion object {
-        /** Generates a fresh device identity: hybrid signing + X25519 keypairs bound by a signature. */
-        fun generate(provider: CryptoProvider): DeviceKeys {
+        /**
+         * Generates a fresh device identity: hybrid signing + X25519 keypairs bound by a signature.
+         *
+         * The binding signature is domain-separated by [namespace] (LEP-10): an identity generated
+         * for one application does not verify under another's namespace, so identities cannot be
+         * silently reused across deployments. Pass the same namespace everywhere — generation,
+         * pairing, membership, invites — or verification will (correctly) fail.
+         */
+        fun generate(
+            provider: CryptoProvider,
+            namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        ): DeviceKeys {
             val signing = HybridSignature.generateKeyPair(provider)
             val identityDh = provider.x25519GenerateKeyPair()
             val kem = XWing.generateKeyPair(provider)
             val bindingSignature = HybridSignature.sign(
                 provider,
                 signing.privateKey,
-                DeviceIdentity.bindingMessage(signing.publicKey, identityDh.publicKey, kem.publicKey),
+                DeviceIdentity.bindingMessage(signing.publicKey, identityDh.publicKey, kem.publicKey, namespace),
             )
             return DeviceKeys(
                 identity = DeviceIdentity(

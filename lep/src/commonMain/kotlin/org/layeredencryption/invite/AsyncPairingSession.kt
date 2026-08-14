@@ -15,6 +15,7 @@ import org.layeredencryption.pairing.PairingRole
 import org.layeredencryption.pairing.constantTimeEquals
 import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.ProtocolLock
+import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.toHexString
 
 /** Invite lifecycle (Async_Invites_Spec.md §2.1). */
@@ -117,6 +118,7 @@ class AsyncInviter private constructor(
     val link: InviteLink,
     val expiryEpochSeconds: Long,
     private val store: InviteStore?,
+    private val namespace: ProtocolNamespace,
 ) {
     var state: AsyncInviteState = AsyncInviteState.PENDING
         private set
@@ -164,7 +166,7 @@ class AsyncInviter private constructor(
         // identity signatures, ML-KEM decapsulation, and X25519 below. A responder who never saw
         // the link stops here without making us spend post-quantum compute.
         val expectedLinkProof = AsyncHandshake.linkProofMac(
-            provider, secret, ridAsync, response.kemCiphertext, response.deviceIdentityS,
+            provider, secret, ridAsync, response.kemCiphertext, response.deviceIdentityS, namespace,
         )
         if (!response.linkProofMac.constantTimeEquals(expectedLinkProof)) return ResponseOutcome.Invalid
 
@@ -207,23 +209,23 @@ class AsyncInviter private constructor(
 
     /** The expensive half of response handling: identity binding, KEM, DH, HKDF, handshake MAC. */
     private fun evaluateResponse(response: AsyncJoinerResponse): Evaluated? {
-        if (!response.deviceIdentityS.verifyBinding(provider)) return null
+        if (!response.deviceIdentityS.verifyBinding(provider, namespace)) return null
 
         val sharedSecret = XWing.decapsulate(provider, inviteXWing.privateKey, response.kemCiphertext)
         val dh1 = AsyncHandshake.contributoryDh(
             provider, XWing.x25519SecretComponent(provider, inviteXWing.privateKey), response.deviceIdentityS.x25519IdentityPublicKey,
         )
         val transcript = AsyncHandshake.transcript(
-            ridAsync, expiryEpochSeconds, inviteXWing.publicKey, device.identity, response.kemCiphertext, response.deviceIdentityS,
+            ridAsync, expiryEpochSeconds, inviteXWing.publicKey, device.identity, response.kemCiphertext, response.deviceIdentityS, namespace,
         )
-        val asyncKey = AsyncHandshake.asyncKey(provider, sharedSecret, dh1, transcript)
+        val asyncKey = AsyncHandshake.asyncKey(provider, sharedSecret, dh1, transcript, namespace)
 
         val expectedJoinerMac = Handshake.mac(provider, asyncKey + secret, transcript, PairingRole.JOINER)
         if (!response.joinerMac.constantTimeEquals(expectedJoinerMac)) return null
 
         return Evaluated(
             claim = Claim(asyncKey, transcript, response.deviceIdentityS),
-            shortAuthString = AsyncHandshake.shortAuthString(provider, sharedSecret, dh1, transcript),
+            shortAuthString = AsyncHandshake.shortAuthString(provider, sharedSecret, dh1, transcript, namespace),
             joinerFingerprint = InviteLink.fingerprintOf(provider, response.deviceIdentityS),
         )
     }
@@ -234,9 +236,9 @@ class AsyncInviter private constructor(
         if (state != AsyncInviteState.CLAIMED) throw PairingException("approve() not in CLAIMED state")
 
         val inviterMac = Handshake.mac(provider, claim.asyncKey + secret, claim.transcript, PairingRole.INVITER)
-        val wrappedMasterKey = Cascade.seal(provider, claim.asyncKey, masterKey, aad = claim.joiner.serialise())
-        val log = MembershipLog.found(provider, device.identity, device.signingKeyPair)
-            .append(provider, MembershipOp.ADD, claim.joiner, wrappedMasterKey, signer = device.signingKeyPair)
+        val wrappedMasterKey = Cascade.seal(provider, claim.asyncKey, masterKey, aad = claim.joiner.serialise(), namespace = namespace)
+        val log = MembershipLog.found(provider, device.identity, device.signingKeyPair, namespace = namespace)
+            .append(provider, MembershipOp.ADD, claim.joiner, wrappedMasterKey, signer = device.signingKeyPair, namespace = namespace)
 
         transitionTo(AsyncInviteState.APPROVED)
         AsyncDelivery(inviterMac, log.serialise())
@@ -349,18 +351,19 @@ class AsyncInviter private constructor(
             nowEpochSeconds: Long,
             expiryEpochSeconds: Long,
             store: InviteStore? = null,
+            namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): AsyncInviter {
             require(expiryEpochSeconds > nowEpochSeconds) { "Invite expiry must be in the future" }
             require(expiryEpochSeconds - nowEpochSeconds <= MAX_LIFETIME_SECONDS) {
                 "Invite lifetime must be at most $MAX_LIFETIME_SECONDS seconds"
             }
             val secret = provider.randomBytes(InviteLink.SECRET_SIZE)
-            val ridAsync = AsyncRendezvous.id(provider, secret)
+            val ridAsync = AsyncRendezvous.id(provider, secret, namespace)
             val inviteXWing = XWing.generateKeyPair(provider)
             val masterKey = provider.randomBytes(MASTER_KEY_SIZE)
-            val bundle = InviteBundle.build(provider, inviteXWing.publicKey, device.identity, expiryEpochSeconds, ridAsync, device.signingKeyPair)
+            val bundle = InviteBundle.build(provider, inviteXWing.publicKey, device.identity, expiryEpochSeconds, ridAsync, device.signingKeyPair, namespace)
             val link = InviteLink.create(provider, secret, device.identity)
-            val inviter = AsyncInviter(provider, device, secret, ridAsync, inviteXWing, masterKey, bundle, link, expiryEpochSeconds, store)
+            val inviter = AsyncInviter(provider, device, secret, ridAsync, inviteXWing, masterKey, bundle, link, expiryEpochSeconds, store, namespace)
             store?.put(inviter.toPending())
             return inviter
         }
@@ -396,6 +399,7 @@ class AsyncInviter private constructor(
             pending: PendingInvite,
             nowEpochSeconds: Long,
             store: InviteStore? = null,
+            namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): AsyncInviter {
             if (pending.state != AsyncInviteState.PENDING) {
                 throw PairingException("Only PENDING invites are resumable, was ${pending.state}")
@@ -405,13 +409,13 @@ class AsyncInviter private constructor(
                 throw PairingException("Invite expired while stored")
             }
             val bundle = InviteBundle.build(
-                provider, pending.inviteXWingPublicKey, device.identity, pending.expiryEpochSeconds, pending.ridAsync, device.signingKeyPair,
+                provider, pending.inviteXWingPublicKey, device.identity, pending.expiryEpochSeconds, pending.ridAsync, device.signingKeyPair, namespace,
             )
             val link = InviteLink.create(provider, pending.secret, device.identity)
             return AsyncInviter(
                 provider, device, pending.secret, pending.ridAsync,
                 KeyPair(publicKey = pending.inviteXWingPublicKey, privateKey = pending.inviteXWingPrivateKey),
-                pending.masterKey, bundle, link, pending.expiryEpochSeconds, store,
+                pending.masterKey, bundle, link, pending.expiryEpochSeconds, store, namespace,
             )
         }
     }
@@ -427,6 +431,8 @@ class AsyncInviter private constructor(
 class AsyncJoiner(
     private val provider: CryptoProvider,
     private val device: DeviceKeys,
+    /** Domain-separates every derivation (LEP-10); must match the inviter's. */
+    private val namespace: ProtocolNamespace = ProtocolNamespace.Default,
 ) {
     private var context: Context? = null
     private var recoveredMasterKey: ByteArray? = null
@@ -438,14 +444,14 @@ class AsyncJoiner(
 
     /** Verifies the bundle (§2.7) and returns the response proving link possession. */
     fun onBundle(link: InviteLink, bundle: InviteBundle, nowEpochSeconds: Long): AsyncJoinerResponse {
-        val ridAsync = AsyncRendezvous.id(provider, link.secret)
+        val ridAsync = AsyncRendezvous.id(provider, link.secret, namespace)
 
         // §2.7 step 2 — anti-directory: a relay that swapped the bundle fails here.
         if (!InviteLink.fingerprintOf(provider, bundle.deviceIdentityA).contentEquals(link.fingerprint)) {
             throw PairingException("Bundle fingerprint does not match the link")
         }
-        if (!bundle.deviceIdentityA.verifyBinding(provider)) throw PairingException("Bundle device-identity binding is invalid")
-        if (!bundle.verifySignature(provider, ridAsync)) throw PairingException("Bundle signature is invalid")
+        if (!bundle.deviceIdentityA.verifyBinding(provider, namespace)) throw PairingException("Bundle device-identity binding is invalid")
+        if (!bundle.verifySignature(provider, ridAsync, namespace)) throw PairingException("Bundle signature is invalid")
         if (nowEpochSeconds > bundle.expiryEpochSeconds + CLOCK_SKEW_SECONDS) throw PairingException("Bundle has expired")
 
         val encapsulation = XWing.encapsulate(provider, bundle.inviteXWingPublicKey)
@@ -453,11 +459,11 @@ class AsyncJoiner(
             provider, device.x25519IdentityPrivateKey, XWing.x25519PublicComponent(bundle.inviteXWingPublicKey),
         )
         val transcript = AsyncHandshake.transcript(
-            ridAsync, bundle.expiryEpochSeconds, bundle.inviteXWingPublicKey, bundle.deviceIdentityA, encapsulation.ciphertext, device.identity,
+            ridAsync, bundle.expiryEpochSeconds, bundle.inviteXWingPublicKey, bundle.deviceIdentityA, encapsulation.ciphertext, device.identity, namespace,
         )
-        val asyncKey = AsyncHandshake.asyncKey(provider, encapsulation.sharedSecret, dh1, transcript)
+        val asyncKey = AsyncHandshake.asyncKey(provider, encapsulation.sharedSecret, dh1, transcript, namespace)
 
-        shortAuthString = AsyncHandshake.shortAuthString(provider, encapsulation.sharedSecret, dh1, transcript)
+        shortAuthString = AsyncHandshake.shortAuthString(provider, encapsulation.sharedSecret, dh1, transcript, namespace)
         context = Context(
             asyncKey = asyncKey,
             expectedInviterMac = Handshake.mac(provider, asyncKey + link.secret, transcript, PairingRole.INVITER),
@@ -465,7 +471,7 @@ class AsyncJoiner(
         return AsyncJoinerResponse(
             kemCiphertext = encapsulation.ciphertext,
             deviceIdentityS = device.identity,
-            linkProofMac = AsyncHandshake.linkProofMac(provider, link.secret, ridAsync, encapsulation.ciphertext, device.identity),
+            linkProofMac = AsyncHandshake.linkProofMac(provider, link.secret, ridAsync, encapsulation.ciphertext, device.identity, namespace),
             joinerMac = Handshake.mac(provider, asyncKey + link.secret, transcript, PairingRole.JOINER),
         )
     }
@@ -497,7 +503,7 @@ class AsyncJoiner(
 
     private fun unwrapMasterKey(context: Context, delivery: AsyncDelivery): ByteArray {
         val log = MembershipLog.deserialise(delivery.serialisedMembershipLog)
-        val verification = log.verify(provider)
+        val verification = log.verify(provider, namespace)
         if (verification !is MembershipVerification.Valid) throw PairingException("Membership log failed verification: $verification")
 
         val ownKey = device.identity.signingPublicKey
@@ -505,7 +511,7 @@ class AsyncJoiner(
 
         val entry = log.addEntryFor(ownKey) ?: throw PairingException("No ADD entry for this device")
         val wrapped = entry.wrappedKeys ?: throw PairingException("No wrapped keys for this device")
-        return Cascade.open(provider, context.asyncKey, wrapped, aad = device.identity.serialise())
+        return Cascade.open(provider, context.asyncKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
     }
 
     /** The recovered context master key, as a defensive copy. */

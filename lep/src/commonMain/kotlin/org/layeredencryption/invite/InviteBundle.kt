@@ -38,8 +38,8 @@ class InviteBundle(
     val signature: ByteArray get() = _signature.copyOf()
 
     /** Verifies `sigA` over the §2.4 payload, binding in the recomputed [ridAsync]. */
-    fun verifySignature(provider: CryptoProvider, ridAsync: ByteArray): Boolean =
-        HybridSignature.verify(provider, deviceIdentityA.signingPublicKey, signedPayload(ridAsync, expiryEpochSeconds, _inviteXWingPublicKey, deviceIdentityA), _signature)
+    fun verifySignature(provider: CryptoProvider, ridAsync: ByteArray, namespace: ProtocolNamespace = ProtocolNamespace.Default): Boolean =
+        HybridSignature.verify(provider, deviceIdentityA.signingPublicKey, signedPayload(ridAsync, expiryEpochSeconds, _inviteXWingPublicKey, deviceIdentityA, namespace), _signature)
 
     fun serialise(): ByteArray = FrameWriter()
         .putBytes(_inviteXWingPublicKey)
@@ -59,11 +59,12 @@ class InviteBundle(
             expiryEpochSeconds: Long,
             ridAsync: ByteArray,
             signer: KeyPair,
+            namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): InviteBundle {
             val signature = HybridSignature.sign(
                 provider,
                 signer.privateKey,
-                signedPayload(ridAsync, expiryEpochSeconds, inviteXWingPublicKey, deviceIdentityA),
+                signedPayload(ridAsync, expiryEpochSeconds, inviteXWingPublicKey, deviceIdentityA, namespace),
             )
             return InviteBundle(inviteXWingPublicKey, deviceIdentityA, expiryEpochSeconds, signature)
         }

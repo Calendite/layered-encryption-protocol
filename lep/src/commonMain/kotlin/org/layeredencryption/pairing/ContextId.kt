@@ -40,7 +40,7 @@ object ContextId {
         membershipLog: MembershipLog,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
     ): String {
-        val genesis = membershipLog.genesisHash(provider)
+        val genesis = membershipLog.genesisHash(provider, namespace)
             ?: throw IllegalArgumentException("An empty membership log founds no calendar")
         return derive(provider, genesis, namespace)
     }

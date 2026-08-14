@@ -4,6 +4,7 @@ import org.layeredencryption.Cascade
 import org.layeredencryption.envelope.EpochKeys
 import org.layeredencryption.CryptoProvider
 import org.layeredencryption.ProtocolLimits
+import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.XWing
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.identity.DeviceKeys
@@ -101,19 +102,6 @@ class ExistingCalendar(
 )
 
 /**
- * The inviting device's side of the pairing handshake (docs/Protocol.md §6.3).
- *
- * The inviter generates the ephemeral X-Wing keypair and the context master key, then: publishes
- * [hello], authenticates the [onJoinerResponse] via its code-keyed MAC, and — only after the human
- * SAS comparison — hands over the master key wrapped under `K_handshake` inside the membership log
- * ([complete]). The master key never leaves unwrapped.
- *
- * Pass [existing] to add someone to a calendar this device is already in. The master key is then
- * the one already in use rather than a fresh one, and the new member is appended to the existing
- * log rather than founding a new one. Any active member may do this: verification requires only
- * that the signer was a member at that point in the chain, not that they founded it.
- */
-/**
  * Opaque, non-forgeable proof that the human SAS comparison was confirmed on a specific session.
  *
  * Its constructor is `internal`, so a consumer cannot fabricate one; a session issues exactly one,
@@ -127,11 +115,26 @@ class SasConfirmation internal constructor(internal val session: Any)
 
 private enum class InviterStage { AWAITING_HELLO, AWAITING_RESPONSE, AWAITING_SAS, SAS_CONFIRMED, COMPLETED }
 
+/**
+ * The inviting device's side of the pairing handshake (docs/Protocol.md §6.3).
+ *
+ * The inviter generates the ephemeral X-Wing keypair and the context master key, then: publishes
+ * [hello], authenticates the [onJoinerResponse] via its code-keyed MAC, and — only after the human
+ * SAS comparison — hands over the master key wrapped under `K_handshake` inside the membership log
+ * ([complete]). The master key never leaves unwrapped.
+ *
+ * Pass [existing] to add someone to a calendar this device is already in. The master key is then
+ * the one already in use rather than a fresh one, and the new member is appended to the existing
+ * log rather than founding a new one. Any active member may do this: verification requires only
+ * that the signer was a member at that point in the chain, not that they founded it.
+ */
 class Inviter(
     private val provider: CryptoProvider,
     private val device: DeviceKeys,
     private val code: PairingCode,
     private val existing: ExistingCalendar? = null,
+    /** Domain-separates every derivation in the ceremony (LEP-10); both sides must agree. */
+    private val namespace: ProtocolNamespace = ProtocolNamespace.Default,
 ) {
     private val xWingKeyPair = XWing.generateKeyPair(provider)
     private var stage = InviterStage.AWAITING_HELLO
@@ -188,13 +191,13 @@ class Inviter(
     fun hello(): InviterHello {
         requireStage(InviterStage.AWAITING_HELLO, InviterStage.AWAITING_RESPONSE) // resend is allowed
         stage = InviterStage.AWAITING_RESPONSE
-        return InviterHello(xWingKeyPair.publicKey, device.identity, Handshake.sasCommitment(provider, sasNonce))
+        return InviterHello(xWingKeyPair.publicKey, device.identity, Handshake.sasCommitment(provider, sasNonce, namespace))
     }
 
     /** Verifies the joiner's code-keyed MAC and returns the inviter's own MAC. Throws on mismatch. */
     fun onJoinerResponse(response: JoinerResponse): InviterConfirm {
         requireStage(InviterStage.AWAITING_RESPONSE)
-        if (!response.joinerDeviceIdentity.verifyBinding(provider)) {
+        if (!response.joinerDeviceIdentity.verifyBinding(provider, namespace)) {
             throw PairingException("Joiner device-identity binding is invalid")
         }
         val sharedSecret = XWing.decapsulate(provider, xWingKeyPair.privateKey, response.kemCiphertext)
@@ -203,10 +206,11 @@ class Inviter(
             inviterDeviceIdentity = device.identity.serialise(),
             kemCiphertext = response.kemCiphertext,
             joinerDeviceIdentity = response.joinerDeviceIdentity.serialise(),
-            sasCommitment = Handshake.sasCommitment(provider, sasNonce),
+            sasCommitment = Handshake.sasCommitment(provider, sasNonce, namespace),
+            namespace = namespace,
         )
         val handshakeKey = Handshake.handshakeKey(provider, sharedSecret, transcript)
-        val codeSecret = Handshake.codeSecret(provider, code.canonical)
+        val codeSecret = Handshake.codeSecret(provider, code.canonical, namespace)
 
         val expectedJoinerMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.JOINER)
         if (!response.joinerMac.constantTimeEquals(expectedJoinerMac)) {
@@ -245,10 +249,10 @@ class Inviter(
         if (confirmation.session !== this) throw PairingException("SAS confirmation belongs to a different session")
         val joiner = joinerDeviceIdentity ?: throw PairingException("complete() called before a joiner response")
         val handshakeKey = handshakeKey ?: throw PairingException("complete() called before the handshake")
-        val wrappedMasterKey = Cascade.seal(provider, handshakeKey, keys.serialise(), aad = joiner.serialise())
+        val wrappedMasterKey = Cascade.seal(provider, handshakeKey, keys.serialise(), aad = joiner.serialise(), namespace = namespace)
         val base = existing?.membershipLog
-            ?: MembershipLog.found(provider, device.identity, device.signingKeyPair)
-        val log = base.append(provider, MembershipOp.ADD, joiner, wrappedMasterKey, signer = device.signingKeyPair)
+            ?: MembershipLog.found(provider, device.identity, device.signingKeyPair, namespace = namespace)
+        val log = base.append(provider, MembershipOp.ADD, joiner, wrappedMasterKey, signer = device.signingKeyPair, namespace = namespace)
         membershipLog = log
         val message = InviterComplete(log.serialise())
         stage = InviterStage.COMPLETED
@@ -283,6 +287,8 @@ class Joiner(
     private val provider: CryptoProvider,
     private val device: DeviceKeys,
     private val code: PairingCode,
+    /** Domain-separates every derivation in the ceremony (LEP-10); both sides must agree. */
+    private val namespace: ProtocolNamespace = ProtocolNamespace.Default,
 ) {
     private var stage = JoinerStage.AWAITING_HELLO
     private var handshakeKey: ByteArray? = null
@@ -334,7 +340,7 @@ class Joiner(
     /** Encapsulates against the inviter's key and returns the joiner's response with its MAC. */
     fun onInviterHello(hello: InviterHello): JoinerResponse {
         requireStage(JoinerStage.AWAITING_HELLO)
-        if (!hello.inviterDeviceIdentity.verifyBinding(provider)) {
+        if (!hello.inviterDeviceIdentity.verifyBinding(provider, namespace)) {
             throw PairingException("Inviter device-identity binding is invalid")
         }
         val encapsulation = XWing.encapsulate(provider, hello.xWingPublicKey)
@@ -344,9 +350,10 @@ class Joiner(
             kemCiphertext = encapsulation.ciphertext,
             joinerDeviceIdentity = device.identity.serialise(),
             sasCommitment = hello.sasCommitment,
+            namespace = namespace,
         )
         val handshakeKey = Handshake.handshakeKey(provider, encapsulation.sharedSecret, transcript)
-        val codeSecret = Handshake.codeSecret(provider, code.canonical)
+        val codeSecret = Handshake.codeSecret(provider, code.canonical, namespace)
 
         this.handshakeKey = handshakeKey
         this.sasCommitment = hello.sasCommitment
@@ -369,7 +376,7 @@ class Joiner(
             throw PairingException("Inviter MAC mismatch — wrong code or man-in-the-middle")
         }
         val commitment = sasCommitment ?: throw PairingException("onInviterConfirm() called before the handshake")
-        if (!Handshake.opensSasCommitment(provider, commitment, confirm.sasNonce)) {
+        if (!Handshake.opensSasCommitment(provider, commitment, confirm.sasNonce, namespace)) {
             throw PairingException("SAS nonce does not open the inviter's commitment — man-in-the-middle")
         }
         val sharedSecret = sharedSecret ?: throw PairingException("onInviterConfirm() called before the handshake")
@@ -402,7 +409,7 @@ class Joiner(
         val handshakeKey = handshakeKey ?: throw PairingException("onInviterComplete() called before the handshake")
         val log = MembershipLog.deserialise(complete.membershipLog)
 
-        val verification = log.verify(provider)
+        val verification = log.verify(provider, namespace)
         if (verification !is MembershipVerification.Valid) {
             throw PairingException("Membership log failed verification: $verification")
         }
@@ -413,7 +420,7 @@ class Joiner(
 
         val entry = log.addEntryFor(ownKey) ?: throw PairingException("No ADD entry for this device")
         val wrapped = entry.wrappedKeys ?: throw PairingException("No wrapped keys for this device")
-        val unwrapped = Cascade.open(provider, handshakeKey, wrapped, aad = device.identity.serialise())
+        val unwrapped = Cascade.open(provider, handshakeKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
         recoveredKeys = EpochKeys.deserialise(unwrapped)
             ?: throw PairingException("The wrapped keys did not decode")
         membershipLog = log

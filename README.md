@@ -112,19 +112,28 @@ with its own.
 
 ## Namespacing: do this before you ship
 
-Every HKDF label and signed-transcript prefix is built from a vendor token, and the default is
-`calendite`, the application this was extracted from. Pass your own:
+Every HKDF label, signature domain, and signed-transcript prefix is built from a vendor token,
+and the default is `calendite`, the application this was extracted from. Pass your own —
+**everywhere**, starting with identity generation:
 
 ```kotlin
 val namespace = ProtocolNamespace("mycoolapp")   // labels become mycoolapp/v1/...
-Cascade.seal(provider, key, plaintext, aad, namespace)
+
+val device = DeviceKeys.generate(provider, namespace)          // identity binding
+val inviter = Inviter(provider, device, code, namespace = namespace)   // live pairing
+val invite = AsyncInviter.create(provider, device, now, expiry, namespace = namespace)
+val log = MembershipLog.found(provider, device.identity, device.signingKeyPair, namespace = namespace)
+Cascade.seal(provider, key, plaintext, aad, namespace)         // data
 ```
 
-This is not cosmetic. Two applications built on this library **should** derive different keys from
-the same secret, so that a device paired for one cannot decrypt data from the other even by
-accident. The default exists only so that devices already paired in the field keep working; a test
-pins every shipped label byte for byte, because changing one character silently orphans every
-existing pairing.
+This is not cosmetic, and it is all-or-nothing: the namespace domain-separates *every* artifact —
+identity bindings, membership signatures and hash chains, pairing and invite transcripts, and the
+data cascade — so an identity generated under one namespace does not verify under another, one
+app's membership log is `InvalidBranch` to another, and cross-namespace ceremonies fail closed at
+the first MAC. Mixing namespaces between calls is therefore a correctness bug that verification
+will catch, not a silent compatibility mode. The default exists only so that devices already
+paired in the field keep working; a test pins every shipped label byte for byte, because changing
+one character silently orphans every existing pairing.
 
 ## What you have to bring
 

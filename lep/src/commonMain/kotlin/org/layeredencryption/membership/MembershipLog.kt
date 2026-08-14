@@ -106,7 +106,8 @@ class MembershipEntry(
         .toByteArray()
 
     /** This entry's hash, which the next entry chains to via its `previousHash`. */
-    internal fun hash(provider: CryptoProvider): ByteArray = provider.sha256(unsignedBytes() + _signature)
+    internal fun hash(provider: CryptoProvider, namespace: ProtocolNamespace = ProtocolNamespace.Default): ByteArray =
+        provider.sha256(unsignedBytes(namespace) + _signature)
 
     internal fun serialise(): ByteArray = FrameWriter()
         .putBytes(_previousHash)
@@ -177,7 +178,8 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
     val entries: List<MembershipEntry> get() = entriesSnapshot.toList()
 
     /** The hash of the latest entry — what the next appended entry chains to. */
-    fun head(provider: CryptoProvider): ByteArray = entriesSnapshot.last().hash(provider)
+    fun head(provider: CryptoProvider, namespace: ProtocolNamespace = ProtocolNamespace.Default): ByteArray =
+        entriesSnapshot.last().hash(provider, namespace)
 
     /** Appends a signed [op] over [deviceIdentity], chained to the current head and signed by [signer]. */
     fun append(
@@ -186,8 +188,9 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         deviceIdentity: DeviceIdentity,
         wrappedKeys: ByteArray?,
         signer: KeyPair,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
     ): MembershipLog = MembershipLog(
-        entriesSnapshot + signEntry(provider, head(provider), op, deviceIdentity, wrappedKeys, signer),
+        entriesSnapshot + signEntry(provider, head(provider, namespace), op, deviceIdentity, wrappedKeys, signer, namespace),
     )
 
     /**
@@ -242,6 +245,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             deviceIdentity = removed,
             wrappedKeys = WrappedKeys.wrapFor(provider, remaining, newMasterKey, namespace),
             signer = signer,
+            namespace = namespace,
         )
     }
 
@@ -270,7 +274,8 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
      * so entry zero and its hash never move. That makes it the right thing to name the calendar
      * after, unlike the master key, which has to change whenever somebody is removed.
      */
-    fun genesisHash(provider: CryptoProvider): ByteArray? = entriesSnapshot.firstOrNull()?.hash(provider)
+    fun genesisHash(provider: CryptoProvider, namespace: ProtocolNamespace = ProtocolNamespace.Default): ByteArray? =
+        entriesSnapshot.firstOrNull()?.hash(provider, namespace)
 
     /**
      * How this log relates to [other].
@@ -285,9 +290,9 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
      * [Reconciliation.InvalidBranch] and is never adopted. This log is assumed already verified by
      * its holder; it is re-verified here so the API cannot be misused with an unchecked receiver.
      */
-    fun reconcile(provider: CryptoProvider, other: MembershipLog): Reconciliation {
-        if (verify(provider) !is MembershipVerification.Valid) return Reconciliation.InvalidBranch
-        if (other.verify(provider) !is MembershipVerification.Valid) return Reconciliation.InvalidBranch
+    fun reconcile(provider: CryptoProvider, other: MembershipLog, namespace: ProtocolNamespace = ProtocolNamespace.Default): Reconciliation {
+        if (verify(provider, namespace) !is MembershipVerification.Valid) return Reconciliation.InvalidBranch
+        if (other.verify(provider, namespace) !is MembershipVerification.Valid) return Reconciliation.InvalidBranch
 
         val shared = commonPrefixLength(other)
         val oursAfter = entriesSnapshot.size - shared
@@ -302,7 +307,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             theirsAfter == 0 -> Reconciliation.WeExtendThem
             else -> Reconciliation.Forked(
                 sharedPrefix = shared,
-                theirsWins = theirsWins(provider, other, shared),
+                theirsWins = theirsWins(provider, other, shared, namespace),
                 revokedMembers = revokedInTail(shared) + other.revokedInTail(shared),
             )
         }
@@ -345,7 +350,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
      * pair of branches choose the same winner without exchanging a word. Every comparison is a
      * total order over symmetric quantities, so exactly one side sees "theirs wins".
      */
-    private fun theirsWins(provider: CryptoProvider, other: MembershipLog, shared: Int): Boolean {
+    private fun theirsWins(provider: CryptoProvider, other: MembershipLog, shared: Int, namespace: ProtocolNamespace): Boolean {
         val ourRevokes = revokedInTail(shared).size
         val theirRevokes = other.revokedInTail(shared).size
         if (theirRevokes != ourRevokes) return theirRevokes > ourRevokes
@@ -354,8 +359,8 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         val theirs = other.entriesSnapshot.size
         if (theirs != ours) return theirs > ours
 
-        val ourHead = entriesSnapshot.last().hash(provider).toHexString()
-        val theirHead = other.entriesSnapshot.last().hash(provider).toHexString()
+        val ourHead = entriesSnapshot.last().hash(provider, namespace).toHexString()
+        val theirHead = other.entriesSnapshot.last().hash(provider, namespace).toHexString()
         return theirHead < ourHead
     }
 
@@ -387,7 +392,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
      * subject identity binding is valid, and its signer was an active member *before* the entry was
      * applied (genesis self-signs). Returns the resulting active-member set, or the first failure.
      */
-    fun verify(provider: CryptoProvider): MembershipVerification {
+    fun verify(provider: CryptoProvider, namespace: ProtocolNamespace = ProtocolNamespace.Default): MembershipVerification {
         // An empty log has no genesis and therefore no founder; every other method here assumes
         // entry zero exists. Calling it valid-with-no-members would let a wiped log verify.
         if (entriesSnapshot.isEmpty()) return MembershipVerification.Invalid("Empty log has no genesis entry", 0)
@@ -399,17 +404,17 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             if (!entry.previousHash.contentEquals(expectedPrevious)) {
                 return MembershipVerification.Invalid("Broken hash chain", index)
             }
-            if (!entry.deviceIdentity.verifyBinding(provider)) {
+            if (!entry.deviceIdentity.verifyBinding(provider, namespace)) {
                 return MembershipVerification.Invalid("Invalid device-identity binding", index)
             }
-            if (!HybridSignature.verify(provider, entry.signerPublicKey, entry.unsignedBytes(), entry.signature)) {
+            if (!HybridSignature.verify(provider, entry.signerPublicKey, entry.unsignedBytes(namespace), entry.signature)) {
                 return MembershipVerification.Invalid("Invalid signature", index)
             }
             val authorisationFailure = checkAuthorisation(index, entry, members)
             if (authorisationFailure != null) return MembershipVerification.Invalid(authorisationFailure, index)
 
             applyOp(entry, members)
-            expectedPrevious = entry.hash(provider)
+            expectedPrevious = entry.hash(provider, namespace)
         }
         return MembershipVerification.Valid(members.toSet())
     }
@@ -462,8 +467,9 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             founder: DeviceIdentity,
             signer: KeyPair,
             wrappedKeys: ByteArray? = null,
+            namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): MembershipLog = MembershipLog(
-            listOf(signEntry(provider, MembershipEntry.GENESIS_PREVIOUS_HASH, MembershipOp.ADD, founder, wrappedKeys, signer)),
+            listOf(signEntry(provider, MembershipEntry.GENESIS_PREVIOUS_HASH, MembershipOp.ADD, founder, wrappedKeys, signer, namespace)),
         )
 
         /** Far beyond any real device list; the bound is what stops 16 MB of confetti becoming 16 MB of list. */
@@ -492,8 +498,9 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             deviceIdentity: DeviceIdentity,
             wrappedKeys: ByteArray?,
             signer: KeyPair,
+            namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): MembershipEntry {
-            val unsigned = MembershipEntry(previousHash, op, deviceIdentity, wrappedKeys, signer.publicKey, ByteArray(0)).unsignedBytes()
+            val unsigned = MembershipEntry(previousHash, op, deviceIdentity, wrappedKeys, signer.publicKey, ByteArray(0)).unsignedBytes(namespace)
             return MembershipEntry(
                 previousHash = previousHash,
                 op = op,
