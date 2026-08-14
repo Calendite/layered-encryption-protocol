@@ -9,6 +9,7 @@ import kotlin.concurrent.thread
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -95,6 +96,21 @@ abstract class InviteStoreConformanceTest {
         store.remove(invite.ridAsyncHex) // and again
         assertNull(store.get(invite.ridAsyncHex))
         assertFalse(store.consume(invite.ridAsyncHex), "cleanup must not have revived the record")
+    }
+
+    @Test
+    fun putCannotResurrectAConsumedId() {
+        val store = createStore()
+        val invite = record(1)
+        store.put(invite)
+        assertTrue(store.consume(invite.ridAsyncHex))
+
+        // The rollback threat: a stale snapshot (a restored backup) re-inserted after consumption.
+        assertFailsWith<IllegalStateException>("a consumed id is permanently tombstoned") {
+            store.put(invite)
+        }
+        assertNull(store.get(invite.ridAsyncHex))
+        assertFalse(store.consume(invite.ridAsyncHex))
     }
 
     @Test

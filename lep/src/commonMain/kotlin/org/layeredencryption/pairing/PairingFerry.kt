@@ -46,6 +46,9 @@ object PairingFerry {
             channel.send(PairingWire.encode(inviter.complete()))
             return inviter.masterKey()
         } finally {
+            // Terminal on every path: success already scrubbed inside complete() (idempotent),
+            // and a thrown MAC mismatch, rejection, or channel failure scrubs here.
+            inviter.destroy()
             channel.close()
         }
     }
@@ -70,6 +73,8 @@ object PairingFerry {
             joiner.onInviterComplete(PairingWire.decodeInviterComplete(channel.receive()))
             return joiner.masterKey()
         } finally {
+            // Terminal on every path, mirroring the inviter side.
+            joiner.destroy()
             channel.close()
         }
     }

@@ -36,6 +36,14 @@ sealed interface Reconciliation {
     /** Not the same calendar: not one shared entry, not even genesis. Never adopt. */
     data object Unrelated : Reconciliation
 
+    /**
+     * The other log fails verification — a broken chain, a bad signature, or an invalid
+     * transition such as the re-ADD padding LEP-03 exploits. Distinct from [Unrelated] (a
+     * stranger's valid calendar) so a consumer can tell forged/tampered history apart from an
+     * honest mismatch. Never adopt.
+     */
+    data object InvalidBranch : Reconciliation
+
     /** Byte-identical. */
     data object Same : Reconciliation
 
@@ -45,8 +53,20 @@ sealed interface Reconciliation {
     /** Ours is theirs with more on the end; keep ours and offer it. */
     data object WeExtendThem : Reconciliation
 
-    /** Both appended after [sharedPrefix]. [theirsWins] is the deterministic tie-break. */
-    data class Forked(val sharedPrefix: Int, val theirsWins: Boolean) : Reconciliation
+    /**
+     * Both branches appended after [sharedPrefix]. [theirsWins] is the deterministic winner
+     * (removal precedence, then length, then true entry hash — see [MembershipLog.reconcile]).
+     *
+     * [revokedMembers] is the union of members revoked in *either* divergent tail, by signing-key
+     * hex. It is the security-load-bearing field: whichever branch a consumer builds on, these
+     * devices are revoked and must stay revoked, so a removal on the losing branch can never be
+     * silently dropped by adopting the winner.
+     */
+    data class Forked(
+        val sharedPrefix: Int,
+        val theirsWins: Boolean,
+        val revokedMembers: Set<String>,
+    ) : Reconciliation
 }
 
 /**
@@ -147,10 +167,17 @@ sealed interface MembershipVerification {
  * X25519 identity key is caught. Clients [verify] the whole chain before honouring any membership.
  * The log is immutable — mutating operations return a new [MembershipLog].
  */
-class MembershipLog private constructor(val entries: List<MembershipEntry>) {
+class MembershipLog private constructor(entries: List<MembershipEntry>) {
+
+    // A structural snapshot: Kotlin's read-only List is an interface, not a guarantee, so the
+    // supplied backing collection is copied on construction and never handed back out — a caller
+    // down-casting [entries] to MutableList mutates its own copy, not a verified log.
+    private val entriesSnapshot: List<MembershipEntry> = entries.toList()
+
+    val entries: List<MembershipEntry> get() = entriesSnapshot.toList()
 
     /** The hash of the latest entry — what the next appended entry chains to. */
-    fun head(provider: CryptoProvider): ByteArray = entries.last().hash(provider)
+    fun head(provider: CryptoProvider): ByteArray = entriesSnapshot.last().hash(provider)
 
     /** Appends a signed [op] over [deviceIdentity], chained to the current head and signed by [signer]. */
     fun append(
@@ -160,7 +187,7 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
         wrappedKeys: ByteArray?,
         signer: KeyPair,
     ): MembershipLog = MembershipLog(
-        entries + signEntry(provider, head(provider), op, deviceIdentity, wrappedKeys, signer),
+        entriesSnapshot + signEntry(provider, head(provider), op, deviceIdentity, wrappedKeys, signer),
     )
 
     /**
@@ -243,7 +270,7 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
      * so entry zero and its hash never move. That makes it the right thing to name the calendar
      * after, unlike the master key, which has to change whenever somebody is removed.
      */
-    fun genesisHash(provider: CryptoProvider): ByteArray? = entries.firstOrNull()?.hash(provider)
+    fun genesisHash(provider: CryptoProvider): ByteArray? = entriesSnapshot.firstOrNull()?.hash(provider)
 
     /**
      * How this log relates to [other].
@@ -252,11 +279,19 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
      * but not impossible: two people removing somebody within a sync window of each other, or one
      * adding while another removes. Refusing to reconcile leaves them permanently disagreeing about
      * who is in the calendar, which is worse than any merge.
+     *
+     * Both logs are **verified first** (LEP-03): reconciling against unverified history is what
+     * let a forged/padded branch influence the outcome, so an invalid [other] returns
+     * [Reconciliation.InvalidBranch] and is never adopted. This log is assumed already verified by
+     * its holder; it is re-verified here so the API cannot be misused with an unchecked receiver.
      */
-    fun reconcile(other: MembershipLog): Reconciliation {
+    fun reconcile(provider: CryptoProvider, other: MembershipLog): Reconciliation {
+        if (verify(provider) !is MembershipVerification.Valid) return Reconciliation.InvalidBranch
+        if (other.verify(provider) !is MembershipVerification.Valid) return Reconciliation.InvalidBranch
+
         val shared = commonPrefixLength(other)
-        val oursAfter = entries.size - shared
-        val theirsAfter = other.entries.size - shared
+        val oursAfter = entriesSnapshot.size - shared
+        val theirsAfter = other.entriesSnapshot.size - shared
         return when {
             // Genesis is what names a calendar. Agreeing on nothing at all does not mean the two
             // diverged, it means they were never the same calendar, and treating that as a fork
@@ -267,17 +302,25 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
             theirsAfter == 0 -> Reconciliation.WeExtendThem
             else -> Reconciliation.Forked(
                 sharedPrefix = shared,
-                theirsWins = theirsWins(other, shared),
+                theirsWins = theirsWins(provider, other, shared),
+                revokedMembers = revokedInTail(shared) + other.revokedInTail(shared),
             )
         }
     }
 
+    /** Members revoked in this log's divergent tail (after the first [shared] entries), by key hex. */
+    private fun revokedInTail(shared: Int): Set<String> =
+        entriesSnapshot.drop(shared)
+            .filter { it.op == MembershipOp.REVOKE }
+            .map { it.deviceIdentity.signingPublicKey.toHexString() }
+            .toSet()
+
     /** How many leading entries the two logs agree on, byte for byte. */
     fun commonPrefixLength(other: MembershipLog): Int {
-        val limit = minOf(entries.size, other.entries.size)
+        val limit = minOf(entriesSnapshot.size, other.entriesSnapshot.size)
         var shared = 0
         while (shared < limit &&
-            entries[shared].serialise().contentEquals(other.entries[shared].serialise())
+            entriesSnapshot[shared].serialise().contentEquals(other.entriesSnapshot[shared].serialise())
         ) {
             shared++
         }
@@ -285,23 +328,39 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
     }
 
     /**
-     * Which side of a fork to build on: the longer branch, ties broken by the lower head hash.
+     * Which side of a fork to build on. **Removals win** (LEP-03), then length, then a true
+     * entry hash:
      *
-     * The rule only has to be deterministic and the same everywhere, so that two devices holding
-     * the same pair of branches choose the same winner without exchanging a word about it. Longer
-     * first because it preserves more of what people actually asked for.
+     * 1. **More revocations first.** The branch whose tail revokes more members wins outright.
+     *    This is what defeats padding: a device forking to escape its own revocation appends
+     *    `ADD`s (which revoke nobody), so its branch scores zero removals and loses to the shorter
+     *    branch carrying the `REVOKE`, however long the padding. "Most entries wins" is
+     *    deliberately *not* the primary key — that was the defect.
+     * 2. **Then length**, when both tails revoke equally — it preserves more of what people asked
+     *    for, and can no longer be used to bury a revocation.
+     * 3. **Then the lower head hash**, an actual `SHA-256` of the final entry (the previous code
+     *    compared serialised entry *bytes* while claiming to compare hashes; now it matches).
+     *
+     * The rule only has to be deterministic and identical everywhere: two devices holding the same
+     * pair of branches choose the same winner without exchanging a word. Every comparison is a
+     * total order over symmetric quantities, so exactly one side sees "theirs wins".
      */
-    private fun theirsWins(other: MembershipLog, shared: Int): Boolean {
-        val ours = entries.size
-        val theirs = other.entries.size
+    private fun theirsWins(provider: CryptoProvider, other: MembershipLog, shared: Int): Boolean {
+        val ourRevokes = revokedInTail(shared).size
+        val theirRevokes = other.revokedInTail(shared).size
+        if (theirRevokes != ourRevokes) return theirRevokes > ourRevokes
+
+        val ours = entriesSnapshot.size
+        val theirs = other.entriesSnapshot.size
         if (theirs != ours) return theirs > ours
-        val ourHead = entries.last().serialise().toHexString()
-        val theirHead = other.entries.last().serialise().toHexString()
+
+        val ourHead = entriesSnapshot.last().hash(provider).toHexString()
+        val theirHead = other.entriesSnapshot.last().hash(provider).toHexString()
         return theirHead < ourHead
     }
 
     /** The entries this log has beyond the first [shared] of them. */
-    fun entriesAfter(shared: Int): List<MembershipEntry> = entries.drop(shared)
+    fun entriesAfter(shared: Int): List<MembershipEntry> = entriesSnapshot.drop(shared)
 
     /**
      * Whether [other] is this log with more entries added to the end.
@@ -317,9 +376,9 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
      * being resolved by whoever synced last.
      */
     fun isExtendedBy(other: MembershipLog): Boolean {
-        if (other.entries.size <= entries.size) return false
-        return entries.indices.all { index ->
-            entries[index].serialise().contentEquals(other.entries[index].serialise())
+        if (other.entriesSnapshot.size <= entriesSnapshot.size) return false
+        return entriesSnapshot.indices.all { index ->
+            entriesSnapshot[index].serialise().contentEquals(other.entriesSnapshot[index].serialise())
         }
     }
 
@@ -331,12 +390,12 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
     fun verify(provider: CryptoProvider): MembershipVerification {
         // An empty log has no genesis and therefore no founder; every other method here assumes
         // entry zero exists. Calling it valid-with-no-members would let a wiped log verify.
-        if (entries.isEmpty()) return MembershipVerification.Invalid("Empty log has no genesis entry", 0)
+        if (entriesSnapshot.isEmpty()) return MembershipVerification.Invalid("Empty log has no genesis entry", 0)
 
         val members = mutableSetOf<String>()
         var expectedPrevious = MembershipEntry.GENESIS_PREVIOUS_HASH
 
-        entries.forEachIndexed { index, entry ->
+        entriesSnapshot.forEachIndexed { index, entry ->
             if (!entry.previousHash.contentEquals(expectedPrevious)) {
                 return MembershipVerification.Invalid("Broken hash chain", index)
             }
@@ -356,7 +415,7 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
     }
 
     /** Finds the entry that added the device with [signingPublicKey], if any (to read its wrapped keys). */
-    fun addEntryFor(signingPublicKey: ByteArray): MembershipEntry? = entries.firstOrNull {
+    fun addEntryFor(signingPublicKey: ByteArray): MembershipEntry? = entriesSnapshot.firstOrNull {
         it.op == MembershipOp.ADD && it.deviceIdentity.signingPublicKey.contentEquals(signingPublicKey)
     }
 
@@ -375,8 +434,15 @@ class MembershipLog private constructor(val entries: List<MembershipEntry>) {
             return null
         }
         if (entry.signerPublicKey.toHexString() !in members) return "Signer is not an active member"
-        if (entry.op == MembershipOp.REVOKE && entry.deviceIdentity.signingPublicKey.toHexString() !in members) {
-            return "Revoking a non-member"
+        val subject = entry.deviceIdentity.signingPublicKey.toHexString()
+        when (entry.op) {
+            // No-op transitions are rejected, not silently absorbed into the member set. A
+            // re-ADD of an active member is the padding primitive LEP-03 exploits: a device
+            // about to be revoked forks and appends signed ADD(self) entries to out-grow the
+            // branch carrying its revocation. Making the transition itself invalid means such a
+            // branch never verifies, so it can never reach reconciliation.
+            MembershipOp.ADD -> if (subject in members) return "Re-adding an active member"
+            MembershipOp.REVOKE -> if (subject !in members) return "Revoking a non-member"
         }
         return null
     }

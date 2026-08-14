@@ -136,16 +136,43 @@ class Inviter(
 
     private var handshakeKey: ByteArray? = null
     private var joinerDeviceIdentity: DeviceIdentity? = null
+    private var destroyed = false
 
     /** The 6-digit SAS to show the user, available once [onJoinerResponse] has run. */
     var shortAuthString: String? = null
         private set
 
-    fun hello(): InviterHello =
-        InviterHello(xWingKeyPair.publicKey, device.identity, Handshake.sasCommitment(provider, sasNonce))
+    /**
+     * Scrubs the session-scoped secrets — the ephemeral X-Wing private key, the handshake key,
+     * and the SAS nonce — and rejects further protocol steps. Runs automatically when [complete]
+     * succeeds; on a failure path (a thrown MAC mismatch, a cancelled ceremony) the caller runs
+     * it, as [PairingFerry] does in its `finally`. Idempotent.
+     *
+     * Long-term material is deliberately untouched: the device keys and the context [keys]
+     * (possibly an existing calendar's) belong to the application, and the ceremony's *results* —
+     * [masterKey], [calendarKeys], [membershipLog], [shortAuthString] — stay readable.
+     */
+    fun destroy() {
+        destroyed = true
+        xWingKeyPair.privateKey.fill(0)
+        sasNonce.fill(0)
+        handshakeKey?.fill(0)
+        handshakeKey = null
+        joinerDeviceIdentity = null
+    }
+
+    private fun checkLive() {
+        check(!destroyed) { "Pairing session has been destroyed" }
+    }
+
+    fun hello(): InviterHello {
+        checkLive()
+        return InviterHello(xWingKeyPair.publicKey, device.identity, Handshake.sasCommitment(provider, sasNonce))
+    }
 
     /** Verifies the joiner's code-keyed MAC and returns the inviter's own MAC. Throws on mismatch. */
     fun onJoinerResponse(response: JoinerResponse): InviterConfirm {
+        checkLive()
         if (!response.joinerDeviceIdentity.verifyBinding(provider)) {
             throw PairingException("Joiner device-identity binding is invalid")
         }
@@ -174,8 +201,12 @@ class Inviter(
         )
     }
 
-    /** Call only after the human SAS comparison matches. Wraps the master key for the joiner. */
+    /**
+     * Call only after the human SAS comparison matches. Wraps the master key for the joiner.
+     * Success is terminal: the session scrubs its handshake secrets on the way out.
+     */
     fun complete(): InviterComplete {
+        checkLive()
         val joiner = joinerDeviceIdentity ?: throw PairingException("complete() called before a joiner response")
         val handshakeKey = handshakeKey ?: throw PairingException("complete() called before the handshake")
         val wrappedMasterKey = Cascade.seal(provider, handshakeKey, keys.serialise(), aad = joiner.serialise())
@@ -183,7 +214,9 @@ class Inviter(
             ?: MembershipLog.found(provider, device.identity, device.signingKeyPair)
         val log = base.append(provider, MembershipOp.ADD, joiner, wrappedMasterKey, signer = device.signingKeyPair)
         membershipLog = log
-        return InviterComplete(log.serialise())
+        val message = InviterComplete(log.serialise())
+        destroy()
+        return message
     }
 
     /** Every context key this device holds, newest last. */
@@ -219,6 +252,30 @@ class Joiner(
     private var sasCommitment: ByteArray? = null
     private var sharedSecret: ByteArray? = null
     private var transcript: PairingTranscript? = null
+    private var destroyed = false
+
+    /**
+     * Scrubs the session-scoped secrets — the handshake key, KEM shared secret, and expected
+     * MAC — and rejects further protocol steps. Runs automatically when [onInviterComplete]
+     * succeeds; on a failure path the caller runs it, as [PairingFerry] does in its `finally`.
+     * Idempotent. The ceremony's results — [masterKey], [calendarKeys], [membershipLog],
+     * [shortAuthString] — stay readable; those belong to the application.
+     */
+    fun destroy() {
+        destroyed = true
+        handshakeKey?.fill(0)
+        handshakeKey = null
+        sharedSecret?.fill(0)
+        sharedSecret = null
+        expectedInviterMac?.fill(0)
+        expectedInviterMac = null
+        sasCommitment = null
+        transcript = null
+    }
+
+    private fun checkLive() {
+        check(!destroyed) { "Pairing session has been destroyed" }
+    }
 
     /**
      * The 6-digit SAS to show the user, available only once [onInviterConfirm] has run.
@@ -231,6 +288,7 @@ class Joiner(
 
     /** Encapsulates against the inviter's key and returns the joiner's response with its MAC. */
     fun onInviterHello(hello: InviterHello): JoinerResponse {
+        checkLive()
         if (!hello.inviterDeviceIdentity.verifyBinding(provider)) {
             throw PairingException("Inviter device-identity binding is invalid")
         }
@@ -259,6 +317,7 @@ class Joiner(
      * from the hello, and only then derives the SAS. Throws on any mismatch.
      */
     fun onInviterConfirm(confirm: InviterConfirm) {
+        checkLive()
         val expected = expectedInviterMac ?: throw PairingException("onInviterConfirm() called before the handshake")
         if (!confirm.inviterMac.constantTimeEquals(expected)) {
             throw PairingException("Inviter MAC mismatch — wrong code or man-in-the-middle")
@@ -272,8 +331,12 @@ class Joiner(
         shortAuthString = Handshake.shortAuthString(provider, sharedSecret, transcript, confirm.sasNonce)
     }
 
-    /** Call only after the human SAS comparison matches. Verifies the log and unwraps the master key. */
+    /**
+     * Call only after the human SAS comparison matches. Verifies the log and unwraps the master
+     * key. Success is terminal: the session scrubs its handshake secrets on the way out.
+     */
     fun onInviterComplete(complete: InviterComplete) {
+        checkLive()
         val handshakeKey = handshakeKey ?: throw PairingException("onInviterComplete() called before the handshake")
         val log = MembershipLog.deserialise(complete.membershipLog)
 
@@ -292,6 +355,7 @@ class Joiner(
         recoveredKeys = EpochKeys.deserialise(unwrapped)
             ?: throw PairingException("The wrapped keys did not decode")
         membershipLog = log
+        destroy()
     }
 
     /** Every context key recovered from the inviter; throws if pairing has not completed. */

@@ -163,10 +163,8 @@ class AsyncInviteStorageFaultTest {
         val store = FaultyStore()
         val inviter = inviter(store = store)
         val joiner = joiner()
-        // Claim with a working store, then plant a stale PENDING snapshot (as a rollback or an
-        // interrupted earlier cleanup would leave) and make removal fail at the terminal step.
+        // Claim with a working store, then make removal fail at the terminal step.
         inviter.onResponse(joiner.onBundle(inviter.link, inviter.bundle, now), now)
-        store.put(staleSnapshotOf(inviter))
         store.failRemove = true
 
         val delivery = inviter.approve() // must not throw, must not lose the delivery
@@ -265,18 +263,71 @@ class AsyncInviteStorageFaultTest {
         }
     }
 
-    /** A stale PENDING snapshot with this inviter's rid, as a rollback/leftover would look. */
-    private fun staleSnapshotOf(inviter: AsyncInviter): PendingInvite {
-        // Rebuild a plausible record: only the rid matters for removal bookkeeping.
-        val rid = org.layeredencryption.invite.AsyncRendezvous.id(provider, inviter.link.secret)
-        return PendingInvite(
-            ridAsync = rid,
-            secret = inviter.link.secret,
-            inviteXWingPublicKey = inviter.bundle.inviteXWingPublicKey,
-            inviteXWingPrivateKey = ByteArray(32),
-            masterKey = ByteArray(32),
-            expiryEpochSeconds = expiry,
-            state = AsyncInviteState.PENDING,
-        )
+    // ── Rollback resistance and losing-key destruction (57a2f38 review) ───────────────────────
+
+    @Test
+    fun aConsumedInviteCannotBeRestoredIntoTheStore() {
+        val device = DeviceKeys.generate(provider)
+        val store = InMemoryInviteStore()
+        val inviter = inviter(device, store)
+        val backup = store.all().single() // the snapshot a backup would hold
+
+        inviter.onResponse(joiner().onBundle(inviter.link, inviter.bundle, now), now)
+
+        // The restore path itself is rejected: consumption tombstones the id.
+        assertFailsWith<IllegalStateException>("a stale backup must not resurrect a burned invite") {
+            store.put(backup)
+        }
+        assertTrue(store.all().isEmpty())
+        assertFalse(store.consume(backup.ridAsyncHex), "the tombstone survives the rejected restore")
+    }
+
+    /** Captures the 32-byte HKDF outputs — the derived async claim keys — for zeroisation checks. */
+    private class KeyCapturingProvider(private val delegate: CryptoProvider) : CryptoProvider by delegate {
+        val derivedKeys = mutableListOf<ByteArray>()
+        override fun hkdfSha256(ikm: ByteArray, salt: ByteArray?, info: ByteArray, length: Int): ByteArray =
+            delegate.hkdfSha256(ikm, salt, info, length).also { if (it.size == 32) derivedKeys += it }
+    }
+
+    @Test
+    fun aLosingInstanceDestroysItsDerivedClaimKey() {
+        val device = DeviceKeys.generate(provider)
+        val store = InMemoryInviteStore()
+        val original = inviter(device, store)
+        val record = store.all().single()
+
+        val capturing = KeyCapturingProvider(provider)
+        val winner = AsyncInviter.resume(provider, device, record, nowEpochSeconds = now, store = store)
+        val loser = AsyncInviter.resume(capturing, device, record, nowEpochSeconds = now, store = store)
+        val response = joiner().onBundle(original.link, winner.bundle, now)
+
+        assertTrue(winner.onResponse(response, now) is ResponseOutcome.Claimed)
+
+        capturing.derivedKeys.clear()
+        assertEquals(ResponseOutcome.ConsumedElsewhere, loser.onResponse(response, now))
+        assertTrue(capturing.derivedKeys.isNotEmpty(), "the loser did derive a key before losing")
+        capturing.derivedKeys.forEach { key ->
+            assertTrue(key.all { it == 0.toByte() }, "a losing instance must zero its derived claim key")
+        }
+    }
+
+    @Test
+    fun aConsumeExceptionDestroysTheDerivedClaimKey() {
+        val store = FaultyStore()
+        val capturing = KeyCapturingProvider(provider)
+        val inviter = AsyncInviter.create(capturing, DeviceKeys.generate(provider), nowEpochSeconds = now, expiryEpochSeconds = expiry, store = store)
+        val response = joiner().onBundle(inviter.link, inviter.bundle, now)
+
+        store.failConsume = true
+        capturing.derivedKeys.clear()
+        assertFailsWith<RuntimeException> { inviter.onResponse(response, now) }
+        assertTrue(capturing.derivedKeys.isNotEmpty())
+        capturing.derivedKeys.forEach { key ->
+            assertTrue(key.all { it == 0.toByte() }, "a failed consume must zero the derived claim key")
+        }
+
+        // The invite is still live: the retried response derives a fresh key and claims.
+        store.failConsume = false
+        assertTrue(inviter.onResponse(response, now) is ResponseOutcome.Claimed)
     }
 }

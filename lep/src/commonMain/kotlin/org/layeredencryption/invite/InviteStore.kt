@@ -66,6 +66,13 @@ class PendingInvite(
  * absent record is a no-op, not an error.
  */
 interface InviteStore {
+    /**
+     * Stores (or overwrites) a live record. A **consumed** id is permanently tombstoned: `put`
+     * MUST throw [IllegalStateException] for it, so a stale snapshot or restored backup cannot
+     * resurrect a burned invite. In a production adapter the tombstone must survive restarts —
+     * destroying a per-record encryption key achieves the same end, by making any restored
+     * ciphertext permanently undecryptable.
+     */
     fun put(invite: PendingInvite)
     fun get(ridAsyncHex: String): PendingInvite?
     fun all(): List<PendingInvite>
@@ -95,8 +102,12 @@ interface InviteStore {
 class InMemoryInviteStore : InviteStore {
     private val lock = ProtocolLock()
     private val invites = mutableMapOf<String, PendingInvite>()
+    private val consumed = mutableSetOf<String>()
 
     override fun put(invite: PendingInvite): Unit = lock.withLock {
+        check(invite.ridAsyncHex !in consumed) {
+            "Invite ${invite.ridAsyncHex} was consumed; a stale snapshot cannot resurrect it"
+        }
         invites[invite.ridAsyncHex] = invite
     }
 
@@ -105,11 +116,13 @@ class InMemoryInviteStore : InviteStore {
     override fun all(): List<PendingInvite> = lock.withLock { invites.values.toList() }
 
     override fun consume(ridAsyncHex: String): Boolean = lock.withLock {
-        invites.remove(ridAsyncHex) != null
+        val won = invites.remove(ridAsyncHex) != null
+        if (won) consumed += ridAsyncHex
+        won
     }
 
     override fun remove(ridAsyncHex: String): Unit = lock.withLock {
         invites.remove(ridAsyncHex)
-        Unit
+        Unit // cleanup only: removal never clears a tombstone
     }
 }

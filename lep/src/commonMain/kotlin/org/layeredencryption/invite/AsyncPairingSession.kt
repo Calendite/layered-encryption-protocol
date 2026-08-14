@@ -184,13 +184,23 @@ class AsyncInviter private constructor(
         // instance claimed first — so this instance expires itself (terminal scrub; the record is
         // already gone) and reports the loss distinctly. A store *exception* still propagates
         // with nothing changed: no claim, still PENDING.
-        if (store != null && !store.consume(ridAsync.toHexString())) {
-            transitionTo(AsyncInviteState.EXPIRED)
-            return ResponseOutcome.ConsumedElsewhere
+        //
+        // The key derived during evaluation is owned by the session only once the claim is
+        // published; every other exit — losing the consume, the store throwing — scrubs it here,
+        // so a losing instance holds no usable session key.
+        var ownershipTransferred = false
+        try {
+            if (store != null && !store.consume(ridAsync.toHexString())) {
+                transitionTo(AsyncInviteState.EXPIRED)
+                return ResponseOutcome.ConsumedElsewhere
+            }
+            claim = evaluated.claim
+            ownershipTransferred = true
+            transitionTo(AsyncInviteState.CLAIMED)
+            return ResponseOutcome.Claimed(evaluated.shortAuthString, evaluated.joinerFingerprint)
+        } finally {
+            if (!ownershipTransferred) evaluated.claim.asyncKey.fill(0)
         }
-        transitionTo(AsyncInviteState.CLAIMED)
-        claim = evaluated.claim
-        return ResponseOutcome.Claimed(evaluated.shortAuthString, evaluated.joinerFingerprint)
     }
 
     private class Evaluated(val claim: Claim, val shortAuthString: String, val joinerFingerprint: ByteArray)

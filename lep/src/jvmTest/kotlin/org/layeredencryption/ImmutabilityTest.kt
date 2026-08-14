@@ -69,6 +69,25 @@ class ImmutabilityTest {
     }
 
     @Test
+    fun membershipLog_entriesListIsAStructuralSnapshot() {
+        val founder = DeviceKeys.generate(provider)
+        val log = MembershipLog.found(provider, founder.identity, founder.signingKeyPair)
+        val roundTripped = MembershipLog.deserialise(log.serialise())
+
+        // Kotlin's List is read-only, not immutable: a hostile down-cast on the returned list
+        // must either fail outright or reach a copy — never the verified log's backing
+        // collection. Both defenses are acceptable; the log being unchanged is the invariant.
+        val entries = roundTripped.entries
+        runCatching {
+            @Suppress("UNCHECKED_CAST")
+            (entries as? MutableList<Any?>)?.clear()
+        }
+
+        assertTrue(roundTripped.entries.size == 1, "the log must be unchanged by the cast mutation")
+        assertIs<MembershipVerification.Valid>(roundTripped.verify(provider))
+    }
+
+    @Test
     fun laneEnvelope_opensAfterItsCiphertextReadIsMutated() {
         val keys = EpochKeys.founding(provider.randomBytes(32))
         val plaintext = "op".encodeToByteArray()

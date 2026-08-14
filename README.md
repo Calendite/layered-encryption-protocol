@@ -45,7 +45,10 @@ is caught.
 
 **Membership is a signed, hash-chained log.** Devices are added and revoked by entries signed by
 an existing member, verified as a chain before any change is honoured. A compromised relay cannot
-inject "and now this device is also a member".
+inject "and now this device is also a member". When two devices change membership at once, forks
+resolve by **removal precedence** — a branch that revokes a device beats a longer branch that
+does not, and the revoked set from both branches is always honoured — so a member cannot escape
+its own revocation by padding a competing branch.
 
 **Signatures are hybrid too, so nothing here is classical-only.** Every signature is Ed25519 and
 ML-DSA-65 over the same message, and **both** must verify or the signature is rejected. Note that

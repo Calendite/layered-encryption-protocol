@@ -37,7 +37,7 @@ class ForkReconciliationTest {
     fun `identical logs are the same`() {
         val (log, _) = founded()
 
-        assertIs<Reconciliation.Same>(log.reconcile(MembershipLog.deserialise(log.serialise())))
+        assertIs<Reconciliation.Same>(log.reconcile(provider, MembershipLog.deserialise(log.serialise())))
     }
 
     @Test
@@ -45,8 +45,8 @@ class ForkReconciliationTest {
         val (base, owner) = founded()
         val longer = base.plusAdd(owner)
 
-        assertIs<Reconciliation.TheyExtendUs>(base.reconcile(longer))
-        assertIs<Reconciliation.WeExtendThem>(longer.reconcile(base))
+        assertIs<Reconciliation.TheyExtendUs>(base.reconcile(provider, longer))
+        assertIs<Reconciliation.WeExtendThem>(longer.reconcile(provider, base))
     }
 
     @Test
@@ -55,7 +55,7 @@ class ForkReconciliationTest {
         val ours = base.plusAdd(owner)
         val theirs = base.plusAdd(owner)
 
-        val fork = assertIs<Reconciliation.Forked>(ours.reconcile(theirs))
+        val fork = assertIs<Reconciliation.Forked>(ours.reconcile(provider, theirs))
         assertEquals(1, fork.sharedPrefix, "they agree on genesis and nothing after it")
         assertEquals(1, ours.entriesAfter(fork.sharedPrefix).size)
     }
@@ -71,8 +71,8 @@ class ForkReconciliationTest {
             val ours = base.plusAdd(owner)
             val theirs = base.plusAdd(owner)
 
-            val fromOurSide = assertIs<Reconciliation.Forked>(ours.reconcile(theirs))
-            val fromTheirSide = assertIs<Reconciliation.Forked>(theirs.reconcile(ours))
+            val fromOurSide = assertIs<Reconciliation.Forked>(ours.reconcile(provider, theirs))
+            val fromTheirSide = assertIs<Reconciliation.Forked>(theirs.reconcile(provider, ours))
 
             // One says "theirs wins", the other must say "mine wins": the same log, either way.
             assertTrue(
@@ -83,13 +83,14 @@ class ForkReconciliationTest {
     }
 
     @Test
-    fun `the longer branch wins regardless of hashes`() {
+    fun `with equal revocations the longer branch wins`() {
+        // No revocations on either side, so removal-precedence is a tie and length decides.
         val (base, owner) = founded()
         val short = base.plusAdd(owner)
         val long = base.plusAdd(owner).plusAdd(owner)
 
-        assertTrue(assertIs<Reconciliation.Forked>(short.reconcile(long)).theirsWins)
-        assertTrue(!assertIs<Reconciliation.Forked>(long.reconcile(short)).theirsWins)
+        assertTrue(assertIs<Reconciliation.Forked>(short.reconcile(provider, long)).theirsWins)
+        assertTrue(!assertIs<Reconciliation.Forked>(long.reconcile(provider, short)).theirsWins)
     }
 
     @Test
@@ -99,7 +100,7 @@ class ForkReconciliationTest {
         val ours = shared.plusAdd(owner)
         val theirs = shared.plusAdd(owner)
 
-        val fork = assertIs<Reconciliation.Forked>(ours.reconcile(theirs))
+        val fork = assertIs<Reconciliation.Forked>(ours.reconcile(provider, theirs))
 
         assertEquals(3, fork.sharedPrefix, "genesis plus the two agreed additions")
         assertEquals(1, ours.entriesAfter(fork.sharedPrefix).size, "only the divergent tail is in question")
@@ -112,9 +113,10 @@ class ForkReconciliationTest {
     @Test
     fun `an unrelated log is not a fork`() {
         val (ours, _) = founded()
-        val (theirs, _) = founded()
+        val (theirs, theirOwner) = founded()
 
-        assertIs<Reconciliation.Unrelated>(ours.reconcile(theirs))
-        assertIs<Reconciliation.Unrelated>(ours.reconcile(theirs.plusAdd(DeviceKeys.generate(provider))))
+        assertIs<Reconciliation.Unrelated>(ours.reconcile(provider, theirs))
+        // A valid unrelated log (their own owner signs the addition) is still Unrelated, not a fork.
+        assertIs<Reconciliation.Unrelated>(ours.reconcile(provider, theirs.plusAdd(theirOwner)))
     }
 }
