@@ -8,11 +8,18 @@ androidCompileSdk = "35"
 # from API 28. A lower minSdk would compile but throw NoSuchAlgorithmException on first seal on
 # API 24-27 devices (LEP-08f). Supporting those would mean a second, divergent cipher path.
 androidMinSdk = "28"
+# The dependency-refresh tooling itself (deps-refresh workflow): proposes catalog updates and is
+# the reason every version lives in this file rather than in a build script.
+versionsPlugin = "0.61.0"
+versionCatalogUpdatePlugin = "1.1.1"
 
 [libraries]
 bouncycastle-provider = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutines" }
 
 [plugins]
+kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
 androidLibrary = { id = "com.android.library", version.ref = "agp" }
+versions = { id = "com.github.ben-manes.versions", version.ref = "versionsPlugin" }
+versionCatalogUpdate = { id = "nl.littlerobots.version-catalog-update", version.ref = "versionCatalogUpdatePlugin" }
