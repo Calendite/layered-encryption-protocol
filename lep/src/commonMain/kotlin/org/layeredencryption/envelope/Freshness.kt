@@ -25,10 +25,16 @@ class ReplayException(message: String) : Exception(message)
  * any newer-epoch op has been accepted on the lane.
  *
  * ### Production contract
- * [InMemoryFreshnessStore] is the reference implementation. A production adapter must make
- * [accept] atomic in the backing store (not merely in-process), persist the state durably, and
- * — the same rollback concern as `InviteStore` — protect it from restoration of old snapshots: a
- * rolled-back freshness store silently re-enables every replay it had already refused.
+ * The production implementation on JVM/Android is
+ * `org.layeredencryption.storage.FileBackedFreshnessStore` (RT-03): [accept] is a durable atomic
+ * compare-and-advance, fsync'd before it returns true, atomic across processes, and
+ * rollback-evident via a revision witness — a restored old snapshot, which silently re-enables
+ * every replay this store had refused, fails loudly instead. [InMemoryFreshnessStore] is the
+ * in-memory reference used in tests; its state dies with the process.
+ *
+ * Whatever the store, consumers must stay idempotent by `(context, lane, seq)`: a crash between
+ * a successful accept and the application applying the operation loses that delivery, and the
+ * peer's re-send is the recovery path.
  */
 interface FreshnessStore {
 

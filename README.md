@@ -90,7 +90,7 @@ val opened = Cascade.open(provider, masterKey, sealed, aad = context)
 // throws instead of being delivered twice. (Re-reading your own trusted local storage is the one
 // job of the explicitly named `openWithoutReplayProtection`.)
 val keys = EpochKeys.founding(masterKey)
-val freshness = InMemoryFreshnessStore()         // production: a durable, rollback-resistant store
+val freshness = InMemoryFreshnessStore()         // production JVM/Android: FileBackedFreshnessStore
 val envelope = LaneEnvelope.seal(provider, keys, contextId, lane, seq, plaintext = myBytes)
 val bytes = envelope.openAndValidate(provider, keys, contextId, lane, freshness)
 ```

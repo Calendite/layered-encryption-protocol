@@ -46,8 +46,11 @@ class PendingInvite(
 }
 
 /**
- * Persistence for pending invites. Production implementation is hardware-wrapped at rest (design
- * §4.6) and deferred; [InMemoryInviteStore] is the reference implementation used in tests.
+ * Persistence for pending invites. The production implementation on JVM/Android is
+ * `org.layeredencryption.storage.FileBackedInviteStore` (RT-02): sealed at rest under an
+ * application-supplied keystore key, crash-safe, tombstone-durable, single-winner across
+ * processes, and rollback-evident. [InMemoryInviteStore] is the in-memory reference used in
+ * tests.
  *
  * A production adapter must treat these records as key material: encrypt them under a
  * platform-keystore-wrapped key, authenticate and rollback-protect them, and honour [remove]
