@@ -94,7 +94,7 @@ class ImmutabilityTest {
         val envelope = LaneEnvelope.seal(provider, keys, "ctx", "lane", seq = 1, plaintext = plaintext)
 
         envelope.ciphertext.fill(0)
-        assertContentEquals(plaintext, envelope.open(provider, keys))
+        assertContentEquals(plaintext, envelope.openWithoutReplayProtection(provider, keys))
     }
 
     @Test

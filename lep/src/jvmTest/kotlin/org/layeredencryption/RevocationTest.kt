@@ -88,7 +88,7 @@ class RevocationTest {
         val after = calendar.log.revoke(provider, calendar.sarah.identity, newKey, calendar.owner.signingKeyPair)
         val mumKeys = calendar.keys.withNextEpoch(after.rotatedKeysFor(provider, calendar.mum).single())
 
-        assertContentEquals("dentist".encodeToByteArray(), before.open(provider, mumKeys))
+        assertContentEquals("dentist".encodeToByteArray(), before.openWithoutReplayProtection(provider, mumKeys))
         assertEquals(0, before.epoch)
 
         val afterRotation = LaneEnvelope.seal(
@@ -110,7 +110,7 @@ class RevocationTest {
         )
 
         // Sarah still holds every key she ever had, which is epoch 0 and nothing more.
-        assertFailsWith<CryptoException> { fresh.open(provider, calendar.keys) }
+        assertFailsWith<CryptoException> { fresh.openWithoutReplayProtection(provider, calendar.keys) }
     }
 
     @Test

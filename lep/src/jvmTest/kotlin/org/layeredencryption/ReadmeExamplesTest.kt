@@ -1,6 +1,7 @@
 package org.layeredencryption
 
 import org.layeredencryption.envelope.EpochKeys
+import org.layeredencryption.envelope.InMemoryFreshnessStore
 import org.layeredencryption.envelope.LaneEnvelope
 import org.layeredencryption.pairing.Inviter
 import org.layeredencryption.pairing.Joiner
@@ -36,8 +37,9 @@ class ReadmeExamplesTest {
         val myBytes = "an op".encodeToByteArray()
 
         val keys = EpochKeys.founding(masterKey)
+        val freshness = InMemoryFreshnessStore()
         val envelope = LaneEnvelope.seal(provider, keys, "context-1", "lane-1", 1, plaintext = myBytes)
-        val bytes = envelope.open(provider, keys)
+        val bytes = envelope.openAndValidate(provider, keys, "context-1", "lane-1", freshness)
         assertContentEquals(myBytes, bytes)
     }
 

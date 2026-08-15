@@ -90,13 +90,19 @@ object AsyncHandshake {
         dh1: ByteArray,
         transcript: ByteArray,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
-    ): ByteArray =
-        provider.hkdfSha256(
-            ikm = sharedSecret + dh1,
-            salt = namespace.label(SUFFIX_PAIRING),
-            info = transcript,
-            length = KEY_SIZE,
-        )
+    ): ByteArray {
+        val ikm = sharedSecret + dh1
+        try {
+            return provider.hkdfSha256(
+                ikm = ikm,
+                salt = namespace.label(SUFFIX_PAIRING),
+                info = transcript,
+                length = KEY_SIZE,
+            )
+        } finally {
+            ikm.fill(0)
+        }
+    }
 
     /** `SAS = uint32BE(HKDF(ss ‖ dh1, salt, transcript ‖ "sas", 4)) mod 10⁶`, 6 digits grouped 3-3 (§2.6). */
     fun shortAuthString(
@@ -106,16 +112,22 @@ object AsyncHandshake {
         transcript: ByteArray,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
     ): String {
-        val out = provider.hkdfSha256(
-            ikm = sharedSecret + dh1,
-            salt = namespace.label(SUFFIX_PAIRING),
-            info = transcript + SAS_INFO,
-            length = SAS_ENTROPY_BYTES,
-        )
+        val ikm = sharedSecret + dh1
+        val out = try {
+            provider.hkdfSha256(
+                ikm = ikm,
+                salt = namespace.label(SUFFIX_PAIRING),
+                info = transcript + SAS_INFO,
+                length = SAS_ENTROPY_BYTES,
+            )
+        } finally {
+            ikm.fill(0)
+        }
         val value = ((out[0].toLong() and 0xFF) shl 24) or
             ((out[1].toLong() and 0xFF) shl 16) or
             ((out[2].toLong() and 0xFF) shl 8) or
             (out[3].toLong() and 0xFF)
+        out.fill(0)
         return Handshake.formatSas(value % SAS_MODULUS)
     }
 

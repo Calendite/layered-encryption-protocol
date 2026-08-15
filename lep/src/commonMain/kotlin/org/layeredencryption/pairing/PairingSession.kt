@@ -200,31 +200,44 @@ class Inviter(
         if (!response.joinerDeviceIdentity.verifyBinding(provider, namespace)) {
             throw PairingException("Joiner device-identity binding is invalid")
         }
+        // Scrubbed on every exit (RT-05): a MAC mismatch throw must not leave the shared secret,
+        // the code secret, or a rejected handshake key waiting for the garbage collector. The
+        // handshake key alone survives, by transferring into the session field.
         val sharedSecret = XWing.decapsulate(provider, xWingKeyPair.privateKey, response.kemCiphertext)
-        val transcript = PairingTranscript(
-            inviterXWingPublicKey = xWingKeyPair.publicKey,
-            inviterDeviceIdentity = device.identity.serialise(),
-            kemCiphertext = response.kemCiphertext,
-            joinerDeviceIdentity = response.joinerDeviceIdentity.serialise(),
-            sasCommitment = Handshake.sasCommitment(provider, sasNonce, namespace),
-            namespace = namespace,
-        )
-        val handshakeKey = Handshake.handshakeKey(provider, sharedSecret, transcript)
-        val codeSecret = Handshake.codeSecret(provider, code.canonical, namespace)
+        var handshakeKey: ByteArray? = null
+        var codeSecret: ByteArray? = null
+        var handshakeKeyTransferred = false
+        try {
+            val transcript = PairingTranscript(
+                inviterXWingPublicKey = xWingKeyPair.publicKey,
+                inviterDeviceIdentity = device.identity.serialise(),
+                kemCiphertext = response.kemCiphertext,
+                joinerDeviceIdentity = response.joinerDeviceIdentity.serialise(),
+                sasCommitment = Handshake.sasCommitment(provider, sasNonce, namespace),
+                namespace = namespace,
+            )
+            handshakeKey = Handshake.handshakeKey(provider, sharedSecret, transcript)
+            codeSecret = Handshake.codeSecret(provider, code.canonical, namespace)
 
-        val expectedJoinerMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.JOINER)
-        if (!response.joinerMac.constantTimeEquals(expectedJoinerMac)) {
-            throw PairingException("Joiner MAC mismatch — wrong code or man-in-the-middle")
+            val expectedJoinerMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.JOINER)
+            if (!response.joinerMac.constantTimeEquals(expectedJoinerMac)) {
+                throw PairingException("Joiner MAC mismatch — wrong code or man-in-the-middle")
+            }
+
+            this.handshakeKey = handshakeKey
+            handshakeKeyTransferred = true
+            this.joinerDeviceIdentity = response.joinerDeviceIdentity
+            this.shortAuthString = Handshake.shortAuthString(provider, sharedSecret, transcript, sasNonce)
+            stage = InviterStage.AWAITING_SAS
+            return InviterConfirm(
+                Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.INVITER),
+                sasNonce,
+            )
+        } finally {
+            sharedSecret.fill(0)
+            codeSecret?.fill(0)
+            if (!handshakeKeyTransferred) handshakeKey?.fill(0)
         }
-
-        this.handshakeKey = handshakeKey
-        this.joinerDeviceIdentity = response.joinerDeviceIdentity
-        this.shortAuthString = Handshake.shortAuthString(provider, sharedSecret, transcript, sasNonce)
-        stage = InviterStage.AWAITING_SAS
-        return InviterConfirm(
-            Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.INVITER),
-            sasNonce,
-        )
     }
 
     /**
@@ -361,6 +374,7 @@ class Joiner(
         this.transcript = transcript
         this.expectedInviterMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.INVITER)
         val joinerMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.JOINER)
+        codeSecret.fill(0)
         stage = JoinerStage.AWAITING_CONFIRM
         return JoinerResponse(encapsulation.ciphertext, device.identity, joinerMac)
     }

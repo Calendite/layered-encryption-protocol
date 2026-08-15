@@ -159,7 +159,7 @@ class EnvelopeFreshnessTest {
         // The stateless API remains for trusted-transport use: it opens a replay happily, which
         // is exactly why openAndValidate exists.
         val envelope = envelope(seq = 1)
-        assertContentEquals(envelope.open(provider, keys), envelope.open(provider, keys))
+        assertContentEquals(envelope.openWithoutReplayProtection(provider, keys), envelope.openWithoutReplayProtection(provider, keys))
         assertTrue(true)
     }
 }

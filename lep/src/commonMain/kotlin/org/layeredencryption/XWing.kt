@@ -76,11 +76,19 @@ object XWing {
         val d = expanded.copyOfRange(0, 32)
         val z = expanded.copyOfRange(32, 64)
         val skX = expanded.copyOfRange(64, 96)
-        return Expanded(
-            mlkem = provider.mlKem768KeyPairFromSeed(d, z),
-            x25519Secret = skX,
-            x25519Public = provider.x25519PublicKey(skX),
-        )
+        try {
+            return Expanded(
+                mlkem = provider.mlKem768KeyPairFromSeed(d, z),
+                x25519Secret = skX,
+                x25519Public = provider.x25519PublicKey(skX),
+            )
+        } finally {
+            // Everything here re-derives from the stored 32-byte seed on demand; no expansion
+            // by-product should outlive the call (RT-05).
+            expanded.fill(0)
+            d.fill(0)
+            z.fill(0)
+        }
     }
 
     /**
@@ -94,8 +102,11 @@ object XWing {
     }
 
     /** The X25519 secret component: `SHAKE256(seed, 96)[64:96]` (draft §5.2). */
-    fun x25519SecretComponent(provider: CryptoProvider, secretKey: ByteArray): ByteArray =
-        expand(provider, secretKey).x25519Secret
+    fun x25519SecretComponent(provider: CryptoProvider, secretKey: ByteArray): ByteArray {
+        val expanded = expand(provider, secretKey)
+        expanded.mlkem.privateKey.fill(0)
+        return expanded.x25519Secret
+    }
 
     /** Generates an X-Wing keypair: a fresh 32-byte seed, expanded per the draft (§5.2). */
     fun generateKeyPair(provider: CryptoProvider): KeyPair =
@@ -104,6 +115,8 @@ object XWing {
     /** The draft's `GenerateKeyPairDerand(sk)` (§5.2): the keypair a given 32-byte seed expands to. */
     fun keyPairFromSeed(provider: CryptoProvider, seed: ByteArray): KeyPair {
         val expanded = expand(provider, seed)
+        expanded.mlkem.privateKey.fill(0)
+        expanded.x25519Secret.fill(0)
         return KeyPair(
             publicKey = expanded.mlkem.publicKey + expanded.x25519Public,
             privateKey = seed.copyOf(),
@@ -125,13 +138,21 @@ object XWing {
         val ephemeral = provider.x25519GenerateKeyPair()
         val x25519Shared = provider.x25519(ephemeral.privateKey, x25519Pk)
 
-        val sharedSecret = combiner(
-            provider = provider,
-            mlkemShared = mlkem.sharedSecret,
-            x25519Shared = x25519Shared,
-            x25519Ciphertext = ephemeral.publicKey,
-            x25519PublicKey = x25519Pk,
-        )
+        val sharedSecret = try {
+            combiner(
+                provider = provider,
+                mlkemShared = mlkem.sharedSecret,
+                x25519Shared = x25519Shared,
+                x25519Ciphertext = ephemeral.publicKey,
+                x25519PublicKey = x25519Pk,
+            )
+        } finally {
+            // Only the combined secret leaves this function; the component secrets and the
+            // ephemeral private scalar must not wait for the garbage collector (RT-05).
+            mlkem.sharedSecret.fill(0)
+            x25519Shared.fill(0)
+            ephemeral.privateKey.fill(0)
+        }
         val ciphertext = mlkem.ciphertext + ephemeral.publicKey
         return KemEncapsulation(ciphertext = ciphertext, sharedSecret = sharedSecret)
     }
@@ -144,13 +165,20 @@ object XWing {
         val mlkemShared = provider.mlKem768Decapsulate(expanded.mlkem.privateKey, mlkemCt)
         val x25519Shared = provider.x25519(expanded.x25519Secret, x25519Ct)
 
-        return combiner(
-            provider = provider,
-            mlkemShared = mlkemShared,
-            x25519Shared = x25519Shared,
-            x25519Ciphertext = x25519Ct,
-            x25519PublicKey = expanded.x25519Public,
-        )
+        try {
+            return combiner(
+                provider = provider,
+                mlkemShared = mlkemShared,
+                x25519Shared = x25519Shared,
+                x25519Ciphertext = x25519Ct,
+                x25519PublicKey = expanded.x25519Public,
+            )
+        } finally {
+            mlkemShared.fill(0)
+            x25519Shared.fill(0)
+            expanded.mlkem.privateKey.fill(0)
+            expanded.x25519Secret.fill(0)
+        }
     }
 
     /**
@@ -164,9 +192,14 @@ object XWing {
         x25519Shared: ByteArray,
         x25519Ciphertext: ByteArray,
         x25519PublicKey: ByteArray,
-    ): ByteArray = provider.sha3_256(
-        mlkemShared + x25519Shared + x25519Ciphertext + x25519PublicKey + COMBINER_LABEL
-    )
+    ): ByteArray {
+        val preimage = mlkemShared + x25519Shared + x25519Ciphertext + x25519PublicKey + COMBINER_LABEL
+        try {
+            return provider.sha3_256(preimage)
+        } finally {
+            preimage.fill(0)
+        }
+    }
 
     private fun splitPublicKey(publicKey: ByteArray): Pair<ByteArray, ByteArray> {
         require(publicKey.size == PUBLIC_KEY_SIZE) { "X-Wing public key must be $PUBLIC_KEY_SIZE bytes, was ${publicKey.size}" }

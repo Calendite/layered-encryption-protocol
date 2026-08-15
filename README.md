@@ -86,9 +86,13 @@ val opened = Cascade.open(provider, masterKey, sealed, aad = context)
 // Or use the envelope, which binds a header (context, lane, sequence, epoch) into the ciphertext
 // so a relay cannot re-label a message without decryption failing. Envelopes take the context's
 // EpochKeys — every key the context has had — so old epochs stay readable after rotations.
+// Opening validates freshness against a FreshnessStore, so a replayed or regressed envelope
+// throws instead of being delivered twice. (Re-reading your own trusted local storage is the one
+// job of the explicitly named `openWithoutReplayProtection`.)
 val keys = EpochKeys.founding(masterKey)
+val freshness = InMemoryFreshnessStore()         // production: a durable, rollback-resistant store
 val envelope = LaneEnvelope.seal(provider, keys, contextId, lane, seq, plaintext = myBytes)
-val bytes = envelope.open(provider, keys)        // throws on tamper; never returns unverified data
+val bytes = envelope.openAndValidate(provider, keys, contextId, lane, freshness)
 ```
 
 Pairing, over any channel that can send and receive byte frames:

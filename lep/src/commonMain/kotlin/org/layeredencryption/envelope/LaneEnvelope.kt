@@ -137,11 +137,14 @@ class LaneEnvelope(
      * plaintext bytes. Throws [CryptoException] on tamper — there is no path that returns
      * unauthenticated bytes.
      *
-     * This is the *stateless* open: it proves the envelope was never modified, and nothing else.
-     * A previously valid envelope replayed by a relay opens here happily. Consumers reading from
-     * an untrusted transport should use [openAndValidate], which also proves it is *new*.
+     * The name is the warning (RT-04): this is the *stateless* open — it proves the envelope was
+     * never modified, and nothing else. A previously valid envelope replayed by a relay opens
+     * here happily. It exists for exactly two jobs: re-reading envelopes from **trusted local
+     * storage** this device already accepted once, and recovery flows replaying a store it
+     * trusts. Anything arriving over a transport — relay, LAN peer, backup restore — must go
+     * through [openAndValidate], which also proves the envelope is *new*.
      */
-    fun open(
+    fun openWithoutReplayProtection(
         provider: CryptoProvider,
         keys: EpochKeys,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
@@ -153,8 +156,9 @@ class LaneEnvelope(
     }
 
     /**
-     * The stateful open (LEP-04): everything [open] does, plus proof of freshness against the
-     * caller's expectations and the lane's accepted watermark.
+     * The stateful open (LEP-04), and the normal way to open an envelope: everything
+     * [openWithoutReplayProtection] does, plus proof of freshness against the caller's
+     * expectations and the lane's accepted watermark.
      *
      * Rejected with [ReplayException], in order, before any decryption:
      * 1. a header naming a different [expectedContextId] or [expectedLane] — AEAD binds the
@@ -193,7 +197,7 @@ class LaneEnvelope(
             throw ReplayException("Stale envelope for lane '$lane': seq=$seq epoch=$epoch is not fresh")
         }
 
-        val plaintext = open(provider, keys, namespace)
+        val plaintext = openWithoutReplayProtection(provider, keys, namespace)
 
         if (!freshness.accept(contextId, lane, seq, epoch)) {
             // Lost an atomic race to a concurrent open of the same (lane, seq): a replay.

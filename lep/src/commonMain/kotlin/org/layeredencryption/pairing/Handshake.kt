@@ -138,7 +138,14 @@ object Handshake {
         codeSecret: ByteArray,
         transcript: PairingTranscript,
         role: PairingRole,
-    ): ByteArray = mac(provider, handshakeKey + codeSecret, transcript.bytes(), role)
+    ): ByteArray {
+        val keyMaterial = handshakeKey + codeSecret
+        try {
+            return mac(provider, keyMaterial, transcript.bytes(), role)
+        } finally {
+            keyMaterial.fill(0)
+        }
+    }
 
     /**
      * Shared low-level MAC used by both the live and async paths: `HMAC(keyMaterial, transcript ‖ role)`
@@ -164,6 +171,7 @@ object Handshake {
         val entropy = provider.hkdfSha256(ikm = sharedSecret, salt = transcript.bytes() + sasNonce, info = SAS_INFO, length = SAS_ENTROPY_BYTES)
         var value = 0L
         for (byte in entropy) value = (value * 256 + (byte.toInt() and 0xFF)) % SAS_MODULUS
+        entropy.fill(0)
         return formatSas(value)
     }
 

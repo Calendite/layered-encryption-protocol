@@ -207,27 +207,50 @@ class AsyncInviter private constructor(
 
     private class Evaluated(val claim: Claim, val shortAuthString: String, val joinerFingerprint: ByteArray)
 
-    /** The expensive half of response handling: identity binding, KEM, DH, HKDF, handshake MAC. */
+    /**
+     * The expensive half of response handling: identity binding, KEM, DH, HKDF, handshake MAC.
+     *
+     * Every derived secret is scrubbed on the way out unless its ownership transfers into the
+     * returned [Evaluated] (RT-05): an invalid MAC — or any exception past derivation — must not
+     * leave the shared secret, the identity DH, or a rejected async key waiting for the garbage
+     * collector.
+     */
     private fun evaluateResponse(response: AsyncJoinerResponse): Evaluated? {
         if (!response.deviceIdentityS.verifyBinding(provider, namespace)) return null
 
-        val sharedSecret = XWing.decapsulate(provider, inviteXWing.privateKey, response.kemCiphertext)
-        val dh1 = AsyncHandshake.contributoryDh(
-            provider, XWing.x25519SecretComponent(provider, inviteXWing.privateKey), response.deviceIdentityS.x25519IdentityPublicKey,
-        )
-        val transcript = AsyncHandshake.transcript(
-            ridAsync, expiryEpochSeconds, inviteXWing.publicKey, device.identity, response.kemCiphertext, response.deviceIdentityS, namespace,
-        )
-        val asyncKey = AsyncHandshake.asyncKey(provider, sharedSecret, dh1, transcript, namespace)
+        var sharedSecret: ByteArray? = null
+        var x25519Secret: ByteArray? = null
+        var dh1: ByteArray? = null
+        var asyncKey: ByteArray? = null
+        var macKey: ByteArray? = null
+        var asyncKeyTransferred = false
+        try {
+            sharedSecret = XWing.decapsulate(provider, inviteXWing.privateKey, response.kemCiphertext)
+            x25519Secret = XWing.x25519SecretComponent(provider, inviteXWing.privateKey)
+            dh1 = AsyncHandshake.contributoryDh(provider, x25519Secret, response.deviceIdentityS.x25519IdentityPublicKey)
+            val transcript = AsyncHandshake.transcript(
+                ridAsync, expiryEpochSeconds, inviteXWing.publicKey, device.identity, response.kemCiphertext, response.deviceIdentityS, namespace,
+            )
+            asyncKey = AsyncHandshake.asyncKey(provider, sharedSecret, dh1, transcript, namespace)
 
-        val expectedJoinerMac = Handshake.mac(provider, asyncKey + secret, transcript, PairingRole.JOINER)
-        if (!response.joinerMac.constantTimeEquals(expectedJoinerMac)) return null
+            macKey = asyncKey + secret
+            val expectedJoinerMac = Handshake.mac(provider, macKey, transcript, PairingRole.JOINER)
+            if (!response.joinerMac.constantTimeEquals(expectedJoinerMac)) return null
 
-        return Evaluated(
-            claim = Claim(asyncKey, transcript, response.deviceIdentityS),
-            shortAuthString = AsyncHandshake.shortAuthString(provider, sharedSecret, dh1, transcript, namespace),
-            joinerFingerprint = InviteLink.fingerprintOf(provider, response.deviceIdentityS),
-        )
+            val evaluated = Evaluated(
+                claim = Claim(asyncKey, transcript, response.deviceIdentityS),
+                shortAuthString = AsyncHandshake.shortAuthString(provider, sharedSecret, dh1, transcript, namespace),
+                joinerFingerprint = InviteLink.fingerprintOf(provider, response.deviceIdentityS),
+            )
+            asyncKeyTransferred = true
+            return evaluated
+        } finally {
+            sharedSecret?.fill(0)
+            x25519Secret?.fill(0)
+            dh1?.fill(0)
+            macKey?.fill(0)
+            if (!asyncKeyTransferred) asyncKey?.fill(0)
+        }
     }
 
     /** Releases the master key: the approval gate (§2.1). Only valid from `CLAIMED`. Burns the slot. */
@@ -235,7 +258,12 @@ class AsyncInviter private constructor(
         val claim = claim ?: throw PairingException("approve() before a claim")
         if (state != AsyncInviteState.CLAIMED) throw PairingException("approve() not in CLAIMED state")
 
-        val inviterMac = Handshake.mac(provider, claim.asyncKey + secret, claim.transcript, PairingRole.INVITER)
+        val macKey = claim.asyncKey + secret
+        val inviterMac = try {
+            Handshake.mac(provider, macKey, claim.transcript, PairingRole.INVITER)
+        } finally {
+            macKey.fill(0)
+        }
         val wrappedMasterKey = Cascade.seal(provider, claim.asyncKey, masterKey, aad = claim.joiner.serialise(), namespace = namespace)
         val log = MembershipLog.found(provider, device.identity, device.signingKeyPair, namespace = namespace)
             .append(provider, MembershipOp.ADD, claim.joiner, wrappedMasterKey, signer = device.signingKeyPair, namespace = namespace)
@@ -455,25 +483,36 @@ class AsyncJoiner(
         if (nowEpochSeconds > bundle.expiryEpochSeconds + CLOCK_SKEW_SECONDS) throw PairingException("Bundle has expired")
 
         val encapsulation = XWing.encapsulate(provider, bundle.inviteXWingPublicKey)
-        val dh1 = AsyncHandshake.contributoryDh(
-            provider, device.x25519IdentityPrivateKey, XWing.x25519PublicComponent(bundle.inviteXWingPublicKey),
-        )
-        val transcript = AsyncHandshake.transcript(
-            ridAsync, bundle.expiryEpochSeconds, bundle.inviteXWingPublicKey, bundle.deviceIdentityA, encapsulation.ciphertext, device.identity, namespace,
-        )
-        val asyncKey = AsyncHandshake.asyncKey(provider, encapsulation.sharedSecret, dh1, transcript, namespace)
+        var dh1: ByteArray? = null
+        var macKey: ByteArray? = null
+        try {
+            dh1 = AsyncHandshake.contributoryDh(
+                provider, device.x25519IdentityPrivateKey, XWing.x25519PublicComponent(bundle.inviteXWingPublicKey),
+            )
+            val transcript = AsyncHandshake.transcript(
+                ridAsync, bundle.expiryEpochSeconds, bundle.inviteXWingPublicKey, bundle.deviceIdentityA, encapsulation.ciphertext, device.identity, namespace,
+            )
+            val asyncKey = AsyncHandshake.asyncKey(provider, encapsulation.sharedSecret, dh1, transcript, namespace)
 
-        shortAuthString = AsyncHandshake.shortAuthString(provider, encapsulation.sharedSecret, dh1, transcript, namespace)
-        context = Context(
-            asyncKey = asyncKey,
-            expectedInviterMac = Handshake.mac(provider, asyncKey + link.secret, transcript, PairingRole.INVITER),
-        )
-        return AsyncJoinerResponse(
-            kemCiphertext = encapsulation.ciphertext,
-            deviceIdentityS = device.identity,
-            linkProofMac = AsyncHandshake.linkProofMac(provider, link.secret, ridAsync, encapsulation.ciphertext, device.identity, namespace),
-            joinerMac = Handshake.mac(provider, asyncKey + link.secret, transcript, PairingRole.JOINER),
-        )
+            shortAuthString = AsyncHandshake.shortAuthString(provider, encapsulation.sharedSecret, dh1, transcript, namespace)
+            macKey = asyncKey + link.secret
+            context = Context(
+                asyncKey = asyncKey,
+                expectedInviterMac = Handshake.mac(provider, macKey, transcript, PairingRole.INVITER),
+            )
+            return AsyncJoinerResponse(
+                kemCiphertext = encapsulation.ciphertext,
+                deviceIdentityS = device.identity,
+                linkProofMac = AsyncHandshake.linkProofMac(provider, link.secret, ridAsync, encapsulation.ciphertext, device.identity, namespace),
+                joinerMac = Handshake.mac(provider, macKey, transcript, PairingRole.JOINER),
+            )
+        } finally {
+            // The async key transfers into the session context; its inputs do not survive the
+            // call (RT-05). A thrown contributory-DH guard must not leave the KEM secret behind.
+            encapsulation.sharedSecret.fill(0)
+            dh1?.fill(0)
+            macKey?.fill(0)
+        }
     }
 
     /**
