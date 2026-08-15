@@ -142,10 +142,36 @@ one character silently orphans every existing pairing.
 ## What you have to bring
 
 - **Transport.** The library never opens a socket.
-- **Storage.** It never writes a file. Keys are passed in as `ByteArray`; where you keep them
-  (hardware keystore, Secure Enclave, a file you should not use) is your decision.
+- **Storage.** Keys are passed in as `ByteArray`; where you keep them (hardware keystore,
+  Secure Enclave, a file you should not use) is your decision. The one exception is opt-in:
+  the sealed-file invite and freshness stores (`org.layeredencryption.storage`, JVM/Android)
+  write exactly the files you point them at, under a key you supply.
 - **Meaning.** It has no idea what your plaintext is, and this is on purpose: a library that
   knows about your domain cannot be reasoned about independently of it.
+
+## Key retention and post-compromise security
+
+History stays readable by design, and that sentence is a security decision, so here is its
+fine print:
+
+- **Every device retains every epoch key it ever received**, indefinitely, unless the
+  application prunes. Rotation (a revocation, a `ROTATE` entry, a fork resolution) starts a
+  new epoch; the old keys stay so the shared history they sealed stays readable.
+- **Who receives history:** a synchronously-paired device gets the full set — both sides are
+  the same person. A member added later starts at their join epoch: rotations wrap exactly
+  one key, and pre-join envelopes are permanently unreadable to them. An async invite founds
+  a fresh context, so there is no earlier history to hand over at all.
+- **Forward secrecy is deliberately absent within the retained window**: compromising a
+  device exposes everything that device can read — which is the same set of events its
+  owner can read, screenshots included. Post-compromise security is real across rotations:
+  revoke the compromised member and everything sealed afterwards is out of the attacker's
+  reach, and the freshness store's epoch monotonicity stops retired keys forging new traffic.
+- **Retention is boundable**: `EpochKeys.retainingFrom(epoch)` plus destroying the superseded
+  instance is cryptographic erasure of older history on that device. The library ships the
+  primitive and deliberately no policy — how much history a calendar keeps is a product
+  question.
+- **Backups:** an epoch-key set at rest is key material. Keep it out of generic backups
+  (`noBackupFilesDir` on Android), same as the sealed stores.
 
 ## Platforms
 

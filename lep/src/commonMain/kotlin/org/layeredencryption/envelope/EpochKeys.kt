@@ -21,6 +21,29 @@ import org.layeredencryption.bytesToInt
  * Passing this around instead of a bare key is deliberate. With a single `ByteArray` there is
  * nothing to stop a caller sealing under a key that has since been retired, which would produce
  * envelopes nobody can read and no error to say so.
+ *
+ * ### Retention policy (RT-06)
+ *
+ * Retention is **indefinite by default and bounded by choice**: the library never prunes on its
+ * own, because "how much history a device can read" is a product decision, not a cryptographic
+ * one. Who holds what:
+ *
+ * - a **founding or synchronously-paired device** holds every epoch — sync pairing transfers the
+ *   full serialised set, because both sides belong to the same person;
+ * - a **member added later** (a membership-log `ADD`, or an async invite — which founds a fresh
+ *   context of its own) starts at its join epoch: rotation entries wrap exactly one 32-byte key,
+ *   pre-join epochs are simply absent here, and [get] answering null for them is the designed
+ *   behaviour, not data loss;
+ * - an application enforcing a retention window prunes with [retainingFrom] and destroys the
+ *   superseded instance — with the at-rest copy rewritten (the sealed-file stores rewrite
+ *   wholesale), that is cryptographic erasure of the dropped epochs on this device.
+ *
+ * The security consequences, stated plainly: within the retained window there is **no forward
+ * secrecy** — compromising a device exposes every epoch it holds, which is the accepted price of
+ * readable history. Across rotations there **is** post-compromise security: an attacker excluded
+ * from a rotation cannot read anything sealed after it, and epoch monotonicity in the freshness
+ * store stops a retired-epoch holder forging fresh traffic. An attacker holding a *current*
+ * member's key material keeps reading until that member is revoked.
  */
 class EpochKeys private constructor(byEpoch: Map<Int, ByteArray>) {
 
@@ -72,6 +95,21 @@ class EpochKeys private constructor(byEpoch: Map<Int, ByteArray>) {
     fun withNextEpoch(key: ByteArray): EpochKeys {
         check(!destroyed) { "EpochKeys has been destroyed" }
         return EpochKeys(byEpoch + (current + 1 to key))
+    }
+
+    /**
+     * This set without any epoch below [oldestRetained] — the retention-policy primitive (RT-06).
+     *
+     * Envelopes from the dropped epochs become permanently unreadable on this device, exactly as
+     * they already are on a device added after those rotations. Erasure is only as real as the
+     * caller's follow-through: [destroy] the superseded instance and rewrite the at-rest copy
+     * (the sealed-file stores rewrite wholesale on every commit). [current] always survives —
+     * pruning the sealing key is dissolution, not retention.
+     */
+    fun retainingFrom(oldestRetained: Int): EpochKeys {
+        check(!destroyed) { "EpochKeys has been destroyed" }
+        require(oldestRetained <= current) { "Retaining from $oldestRetained would drop the current epoch $current" }
+        return EpochKeys(byEpoch.filterKeys { it >= oldestRetained })
     }
 
     /** `epoch ‖ key` pairs, framed, ascending. Encrypted at rest by whatever stores it. */
