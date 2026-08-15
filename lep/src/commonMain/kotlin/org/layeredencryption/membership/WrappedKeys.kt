@@ -52,7 +52,7 @@ object WrappedKeys {
     private const val LENGTH_PREFIX = 4
 
     /** The one thing this construction wraps in this protocol: a 32-byte context master key. */
-    private const val CONTEXT_KEY_BYTES = 32
+    const val CONTEXT_KEY_BYTES = 32
 
     /** The signing public key as lowercase hex: 2 characters per byte. */
     private const val MEMBER_ID_HEX_LENGTH = HybridSignature.PUBLIC_KEY_SIZE * 2

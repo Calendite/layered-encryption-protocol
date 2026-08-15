@@ -16,6 +16,15 @@ import org.layeredencryption.toHexString
 enum class MembershipOp(val code: Int) {
     ADD(1),
     REVOKE(2),
+
+    /**
+     * A context-key rotation with no membership change: the entry's subject is the signer itself
+     * and its wrapped keys carry a fresh context key sealed to every active member. Exists because
+     * rotation otherwise only travels on [REVOKE], yet fork resolution can drop a key-holder with
+     * nobody left to revoke — a member added on the losing branch received wrapped keys there but
+     * was never a member of the winning branch. Also serves as a standalone rekey primitive.
+     */
+    ROTATE(3),
     ;
 
     companion object {
@@ -57,16 +66,58 @@ sealed interface Reconciliation {
      * Both branches appended after [sharedPrefix]. [theirsWins] is the deterministic winner
      * (removal precedence, then length, then true entry hash — see [MembershipLog.reconcile]).
      *
+     * **Do not adopt either branch from this outcome directly** — call
+     * [MembershipLog.resolveFork], which enforces the security consequences and returns the log
+     * actually safe to adopt. Adopting the raw winner leaves [revokedMembers] active when their
+     * revocation was on the losing branch, keeps any additions a condemned member smuggled into
+     * the winning tail, and rotates no keys. This outcome is classification, not resolution.
+     *
      * [revokedMembers] is the union of members revoked in *either* divergent tail, by signing-key
-     * hex. It is the security-load-bearing field: whichever branch a consumer builds on, these
-     * devices are revoked and must stay revoked, so a removal on the losing branch can never be
-     * silently dropped by adopting the winner.
+     * hex: whichever branch wins, these devices are revoked and must stay revoked, so a removal
+     * on the losing branch can never be silently dropped by adopting the winner.
      */
     data class Forked(
         val sharedPrefix: Int,
         val theirsWins: Boolean,
         val revokedMembers: Set<String>,
     ) : Reconciliation
+}
+
+/**
+ * The outcome of [MembershipLog.resolveFork]: a fork turned into one log that is safe to adopt,
+ * or a reason no resolution is possible for this caller.
+ */
+sealed interface ForkResolution {
+    /**
+     * The fork is resolved: adopt [log] and nothing else. If [newMasterKey] is non-null the
+     * context key was rotated and this is its current value, also readable by every surviving
+     * member via [MembershipLog.rotatedKeysFor]; null means the fork changed nothing that key
+     * material depends on (typically two devices' concurrent resolutions of the same fork
+     * converging) and the winner was adopted as-is.
+     *
+     * [revoked] is everyone resolution itself revoked: union members still active on the winning
+     * branch plus condemned-sponsor additions. [lostAdditions] is members added on the losing
+     * branch whose addition did not survive — they were dropped, not revoked, and re-inviting
+     * them is the application's (or a human's) call. Failing towards fewer members is the safe
+     * direction.
+     */
+    class Resolved(
+        val log: MembershipLog,
+        val newMasterKey: ByteArray?,
+        val revoked: Set<String>,
+        val lostAdditions: Set<String>,
+    ) : ForkResolution
+
+    /** Not actually a fork: the plain [reconciliation] outcome for the caller to handle normally. */
+    class NotForked(val reconciliation: Reconciliation) : ForkResolution
+
+    /**
+     * The resolver has no authority to resolve: it is itself revoked in the fork union, condemned
+     * as a tainted addition, or absent from the winning branch (added only on the losing side).
+     * Removal precedence is honoured even when the revocation was spurious — a device in this
+     * position does not resolve forks, it gets re-invited.
+     */
+    data object ResolverExcluded : ForkResolution
 }
 
 /**
@@ -94,6 +145,8 @@ class MembershipEntry(
     val wrappedKeys: ByteArray? get() = _wrappedKeys?.copyOf()
     val signerPublicKey: ByteArray get() = _signerPublicKey.copyOf()
     val signature: ByteArray get() = _signature.copyOf()
+
+    internal val hasWrappedKeys: Boolean get() = _wrappedKeys != null
 
     /** The signed-over bytes (everything except the signature itself). */
     internal fun unsignedBytes(namespace: ProtocolNamespace = ProtocolNamespace.Default): ByteArray = FrameWriter()
@@ -207,6 +260,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             when (entry.op) {
                 MembershipOp.ADD -> active[key] = entry.deviceIdentity
                 MembershipOp.REVOKE -> active.remove(key)
+                MembershipOp.ROTATE -> Unit
             }
         }
         return active.values.toList()
@@ -250,19 +304,42 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
     }
 
     /**
+     * Rotates the context key to [newMasterKey] with no membership change: a self-signed [MembershipOp.ROTATE]
+     * entry carrying the new key sealed to every active member, the signer included.
+     *
+     * This is what fork resolution ends with — a rotation that excludes people who were never
+     * members of this branch but hold key material anyway (an addition on a losing branch) has
+     * nobody to [revoke]. It is also the standalone rekey: periodic rotation or post-compromise
+     * recovery without inventing a revocation to carry it.
+     */
+    fun rotate(
+        provider: CryptoProvider,
+        newMasterKey: ByteArray,
+        signer: DeviceKeys,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): MembershipLog = append(
+        provider = provider,
+        op = MembershipOp.ROTATE,
+        deviceIdentity = signer.identity,
+        wrappedKeys = WrappedKeys.wrapFor(provider, activeIdentities(provider), newMasterKey, namespace),
+        signer = signer.signingKeyPair,
+        namespace = namespace,
+    )
+
+    /**
      * Every rotated context key this log hands [device], oldest first.
      *
-     * One per revoke entry addressed to them, so the result lines up with epochs 1, 2, 3 and so on;
-     * epoch 0 came from pairing. A device that was not a recipient of some rotation contributes
-     * nothing at that position, which is why the caller reconciles by count rather than assuming
-     * the list is complete.
+     * One per rotation-carrying entry ([MembershipOp.REVOKE] or [MembershipOp.ROTATE]) addressed
+     * to them, so the result lines up with epochs 1, 2, 3 and so on; epoch 0 came from pairing. A
+     * device that was not a recipient of some rotation contributes nothing at that position, which
+     * is why the caller reconciles by count rather than assuming the list is complete.
      */
     fun rotatedKeysFor(
         provider: CryptoProvider,
         device: DeviceKeys,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
     ): List<ByteArray> = entries
-        .filter { it.op == MembershipOp.REVOKE }
+        .filter { it.op == MembershipOp.REVOKE || it.op == MembershipOp.ROTATE }
         .mapNotNull { entry ->
             entry.wrappedKeys?.let { WrappedKeys.unwrapFor(provider, it, device, namespace) }
         }
@@ -311,6 +388,98 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
                 revokedMembers = revokedInTail(shared) + other.revokedInTail(shared),
             )
         }
+    }
+
+    /**
+     * Resolves a fork with [other] into one log that is safe to adopt (RT-01).
+     *
+     * [reconcile] classifies; this enforces. The winning branch is chosen by the usual
+     * deterministic rule, then every security consequence the classification only *reported* is
+     * appended as real, signed entries by [resolver]:
+     *
+     * 1. **The revocation union is enforced.** Every member revoked in either divergent tail who
+     *    is still active on the winning branch is revoked, in sorted-key order so concurrent
+     *    resolvers produce the same operations.
+     * 2. **Condemned sponsors lose their additions.** A winning-tail `ADD` whose signer is being
+     *    revoked by the fork — directly or transitively, a puppet sponsoring a puppet — is
+     *    revoked too. This is what stops a padded branch's sock-puppet members outliving the
+     *    attacker who added them. Additions sponsored by surviving members are kept.
+     * 3. **Key material is rotated.** If resolution revoked anyone, or a losing-tail addition
+     *    held wrapped keys and did not survive, the log ends with a [rotate] whose fresh key is
+     *    sealed only to post-resolution members. A fork that changed nothing adopts the winner
+     *    with no rotation, which is what lets two devices' concurrent resolutions converge
+     *    instead of rotating forever.
+     *
+     * Returns [ForkResolution.ResolverExcluded] when [resolver] is condemned by the fork or absent
+     * from the winning branch: a device with no post-resolution membership has no authority, it
+     * gets re-invited. Anything [reconcile] classifies as not-a-fork comes back as
+     * [ForkResolution.NotForked] with the classification to handle normally — [Reconciliation.InvalidBranch]
+     * and [Reconciliation.Unrelated] keep their never-adopt meaning.
+     */
+    fun resolveFork(
+        provider: CryptoProvider,
+        other: MembershipLog,
+        resolver: DeviceKeys,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): ForkResolution {
+        val outcome = reconcile(provider, other, namespace)
+        if (outcome !is Reconciliation.Forked) return ForkResolution.NotForked(outcome)
+
+        val winner = if (outcome.theirsWins) other else this
+        val loser = if (outcome.theirsWins) this else other
+
+        // The union, closed over sponsorship: a winning-tail ADD signed by anyone already
+        // condemned condemns its subject. One chronological pass is transitive closure, because a
+        // puppet can only sponsor after the entry that added it.
+        val condemned = outcome.revokedMembers.toMutableSet()
+        for (entry in winner.entriesAfter(outcome.sharedPrefix)) {
+            if (entry.op == MembershipOp.ADD && entry.signerPublicKey.toHexString() in condemned) {
+                condemned += entry.deviceIdentity.signingPublicKey.toHexString()
+            }
+        }
+
+        val winnerActive = (winner.verify(provider, namespace) as MembershipVerification.Valid).activeMembers
+        val resolverHex = resolver.identity.signingPublicKey.toHexString()
+        if (resolverHex in condemned || resolverHex !in winnerActive) return ForkResolution.ResolverExcluded
+
+        // The resolver survives every step below (it is not condemned), so no revocation can
+        // empty the calendar. Sorted order keeps concurrent resolvers byte-comparable in intent.
+        val identityByHex = winner.activeIdentities(provider).associateBy { it.signingPublicKey.toHexString() }
+        val toRevoke = condemned.filter { it in winnerActive }.sorted()
+        var resolved = winner
+        for (hex in toRevoke) {
+            resolved = resolved.revoke(
+                provider = provider,
+                removed = identityByHex.getValue(hex),
+                newMasterKey = provider.randomBytes(WrappedKeys.CONTEXT_KEY_BYTES),
+                signer = resolver.signingKeyPair,
+                namespace = namespace,
+            )
+        }
+
+        val resolvedActive = (resolved.verify(provider, namespace) as MembershipVerification.Valid).activeMembers
+        val loserTailAdds = loser.entriesAfter(outcome.sharedPrefix)
+            .filter { it.op == MembershipOp.ADD }
+            .map { it.deviceIdentity.signingPublicKey.toHexString() }
+        // Dropped losing-tail additions received wrapped keys when they were added, so they force
+        // a rotation even when there was nobody to revoke. The reported set excludes members the
+        // fork itself revoked: their removal was asked for, not lost.
+        val droppedKeyHolders = loserTailAdds.any { it !in resolvedActive }
+        val lostAdditions = loserTailAdds
+            .filter { it !in resolvedActive && it !in outcome.revokedMembers }
+            .toSet()
+
+        var newMasterKey: ByteArray? = null
+        if (toRevoke.isNotEmpty() || droppedKeyHolders) {
+            newMasterKey = provider.randomBytes(WrappedKeys.CONTEXT_KEY_BYTES)
+            resolved = resolved.rotate(provider, newMasterKey, resolver, namespace)
+        }
+        return ForkResolution.Resolved(
+            log = resolved,
+            newMasterKey = newMasterKey,
+            revoked = toRevoke.toSet(),
+            lostAdditions = lostAdditions,
+        )
     }
 
     /** Members revoked in this log's divergent tail (after the first [shared] entries), by key hex. */
@@ -448,6 +617,13 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             // branch never verifies, so it can never reach reconciliation.
             MembershipOp.ADD -> if (subject in members) return "Re-adding an active member"
             MembershipOp.REVOKE -> if (subject !in members) return "Revoking a non-member"
+            // A rotation names its own signer as subject — there is no third party to speak
+            // about — and one that carries no keys rotates to nobody, which would let an entry
+            // masquerade as a rekey while quietly orphaning every member.
+            MembershipOp.ROTATE -> {
+                if (subject != entry.signerPublicKey.toHexString()) return "Rotation subject must be its signer"
+                if (!entry.hasWrappedKeys) return "Rotation must carry wrapped keys"
+            }
         }
         return null
     }
@@ -457,6 +633,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         when (entry.op) {
             MembershipOp.ADD -> members.add(deviceKey)
             MembershipOp.REVOKE -> members.remove(deviceKey)
+            MembershipOp.ROTATE -> Unit
         }
     }
 
