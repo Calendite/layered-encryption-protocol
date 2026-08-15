@@ -1,5 +1,6 @@
 package org.layeredencryption
 
+import org.layeredencryption.FrameWriter
 import org.layeredencryption.envelope.EpochKeys
 import org.layeredencryption.envelope.LaneEnvelope
 import org.layeredencryption.identity.DeviceKeys
@@ -249,28 +250,90 @@ class MembershipForkResolutionTest {
         val master = newKey()
         val base = MembershipLog.found(provider, a.identity, a.signingKeyPair).add(c, a).add(x, a).add(y, a)
 
-        // Keyless branch tails, so the resolution's single ROTATE is the log's only rotation.
-        val branchA = base.append(provider, MembershipOp.REVOKE, x.identity, wrappedKeys = null, signer = a.signingKeyPair)
-        val branchC = base.append(provider, MembershipOp.REVOKE, y.identity, wrappedKeys = null, signer = c.signingKeyPair)
+        // Keyed branch tails, as every real revocation is; the resolution then contributes
+        // exactly one further rotation on top of whatever the winning branch already carried.
+        val branchA = base.revokeBy(x, a)
+        val branchC = base.revokeBy(y, c)
 
         val resolved = assertIs<ForkResolution.Resolved>(branchA.resolveFork(provider, branchC, resolver = a))
         val key = assertNotNull(resolved.newMasterKey)
+        val winner = if (branchA.isExtendedBy(resolved.log)) branchA else branchC
 
-        // Bystander path: exactly one rotation to adopt, despite two revocations resolving.
+        // Bystander path: the winner's own rotations plus exactly one from resolution, despite
+        // two revocations resolving.
         val cRotations = resolved.log.rotatedKeysFor(provider, c)
-        assertEquals(1, cRotations.size, "one fork, one epoch, however many revocations")
-        val cKeys = EpochKeys.founding(master).withNextEpoch(cRotations.single())
+        assertEquals(winner.rotatedKeysFor(provider, c).size + 1, cRotations.size, "one fork, one epoch")
+        val cKeys = cRotations.fold(EpochKeys.founding(master)) { keys, rotation -> keys.withNextEpoch(rotation) }
 
-        // Resolver path: apply the returned key directly. Both land on the same epoch number.
-        val aKeys = EpochKeys.founding(master).withNextEpoch(key)
+        // Resolver path: the winner's rotations it already held, then the returned key applied
+        // directly. Both public paths land on the same epoch number.
+        val aKeys = winner.rotatedKeysFor(provider, a)
+            .fold(EpochKeys.founding(master)) { keys, rotation -> keys.withNextEpoch(rotation) }
+            .withNextEpoch(key)
         assertEquals(aKeys.current, cKeys.current, "both public paths agree on the epoch number")
 
         // Sealed on one surviving device, opened on the other, at the agreed epoch.
         val envelope = LaneEnvelope.seal(provider, aKeys, "ctx", "lane", 1, "post-fork".encodeToByteArray())
-        assertEquals(1, envelope.epoch)
+        assertEquals(aKeys.current, envelope.epoch)
         assertContentEquals("post-fork".encodeToByteArray(), envelope.openWithoutReplayProtection(provider, cKeys))
         assertFalse(resolved.log.handsKeyTo(x, key))
         assertFalse(resolved.log.handsKeyTo(y, key))
+    }
+
+    // ── Truncation resistance (6ddd7e4 retest, finding 1) ────────────────────────────────────
+
+    /**
+     * The attack the batch rule exists for: an untrusted relay strips the final `ROTATE` from a
+     * resolved log and delivers the correctly signed prefix, where a member reads as revoked
+     * while everyone keeps sealing under the key that member still holds. The prefix must not
+     * verify, and reconciliation must never adopt it.
+     */
+    @Test
+    fun truncatingTheRotationOffAResolvedLogInvalidatesThePrefix() {
+        val a = DeviceKeys.generate(provider)
+        val b = DeviceKeys.generate(provider)
+        val c = DeviceKeys.generate(provider)
+        val base = MembershipLog.found(provider, a.identity, a.signingKeyPair).add(b, a).add(c, a)
+
+        val honest = base.revokeBy(b, a)
+        val padded = base.revokeBy(c, b).add(DeviceKeys.generate(provider), b)
+        val resolved = assertIs<ForkResolution.Resolved>(honest.resolveFork(provider, padded, resolver = a))
+
+        // The relay suppresses the final entry — the rotation — and forwards the rest.
+        val truncated = MembershipLog.deserialise(
+            resolved.log.entries.dropLast(1).fold(FrameWriter()) { writer, entry -> writer.putBytes(entry.serialise()) }.toByteArray(),
+        )
+
+        assertIs<MembershipVerification.Invalid>(truncated.verify(provider), "the truncated prefix must not verify")
+        assertIs<Reconciliation.InvalidBranch>(honest.reconcile(provider, truncated), "and must never be adopted")
+    }
+
+    @Test
+    fun aStandaloneKeylessRevocationIsNotAValidState() {
+        val a = DeviceKeys.generate(provider)
+        val b = DeviceKeys.generate(provider)
+        val log = MembershipLog.found(provider, a.identity, a.signingKeyPair).add(b, a)
+
+        // Ejection with no cryptographic exclusion: valid-looking, security-free. Refused.
+        val bare = log.append(provider, MembershipOp.REVOKE, b.identity, wrappedKeys = null, signer = a.signingKeyPair)
+        assertIs<MembershipVerification.Invalid>(bare.verify(provider))
+    }
+
+    @Test
+    fun aKeylessRevocationBatchMustRunStraightIntoItsRotation() {
+        val a = DeviceKeys.generate(provider)
+        val b = DeviceKeys.generate(provider)
+        val c = DeviceKeys.generate(provider)
+        val log = MembershipLog.found(provider, a.identity, a.signingKeyPair).add(b, a).add(c, a)
+        val keyless = log.append(provider, MembershipOp.REVOKE, b.identity, wrappedKeys = null, signer = a.signingKeyPair)
+
+        // An ADD wedged between the batch and its rotation leaves the revocation unterminated.
+        val interrupted = keyless.add(DeviceKeys.generate(provider), a)
+        assertIs<MembershipVerification.Invalid>(interrupted.verify(provider))
+
+        // The terminated batch — straight into the rotation that excludes the removed — is valid.
+        val terminated = keyless.rotate(provider, newKey(), signer = a)
+        assertIs<MembershipVerification.Valid>(terminated.verify(provider))
     }
 
     // ── The ROTATE op itself ─────────────────────────────────────────────────────────────────

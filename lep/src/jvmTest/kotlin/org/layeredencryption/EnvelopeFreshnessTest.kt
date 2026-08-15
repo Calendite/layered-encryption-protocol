@@ -1,6 +1,7 @@
 package org.layeredencryption
 
 import org.layeredencryption.envelope.EpochKeys
+import org.layeredencryption.envelope.FreshnessStore
 import org.layeredencryption.envelope.InMemoryFreshnessStore
 import org.layeredencryption.envelope.LaneEnvelope
 import org.layeredencryption.envelope.ReplayException
@@ -10,6 +11,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -136,10 +138,9 @@ class EnvelopeFreshnessTest {
                 }
             }.forEach { it.join() }
 
-            // Depending on how the race fell, one or both racers delivered (delivery is
-            // idempotent by contract); what must hold is that at least one did and the
-            // sequence is spent afterwards.
-            assertTrue(results.count { it == true } >= 1, "somebody must deliver the envelope")
+            // The delivery transaction serializes the racers: exactly one delivers, the loser
+            // is refused as a replay, and the sequence is spent afterwards.
+            assertEquals(1, results.count { it == true }, "exactly one racer may deliver the envelope")
             assertFailsWith<ReplayException> { envelope.openFresh(store) }
         }
     }
@@ -161,6 +162,48 @@ class EnvelopeFreshnessTest {
         }
 
         assertContentEquals("op-1".encodeToByteArray(), envelope.openFresh(store))
+    }
+
+    /**
+     * The ordering contract (6ddd7e4 retest, finding 2): two *different* sequences racing the
+     * delivery transaction can end 1-then-2, or 2-with-1-refused — never 1 delivered after 2.
+     * Idempotency cannot save that case (they are distinct operations), so the transaction must.
+     */
+    @Test
+    fun aStaleSequenceIsNeverDeliveredAfterANewerOne() {
+        repeat(20) {
+            val store = InMemoryFreshnessStore()
+            val delivered = java.util.Collections.synchronizedList(mutableListOf<Int>())
+            val barrier = CyclicBarrier(2)
+            listOf(1, 2).map { seq ->
+                thread {
+                    barrier.await()
+                    store.deliverIfFresh("ctx", "device-1", seq, 0) { delivered += seq }
+                }
+            }.forEach { it.join() }
+
+            assertTrue(
+                delivered == listOf(1, 2) || delivered == listOf(2),
+                "sequence 1 must never be delivered after sequence 2, got $delivered",
+            )
+        }
+    }
+
+    /** An envelope that goes stale between the advisory check and the transaction never delivers. */
+    @Test
+    fun deliveryNeverRunsForASequenceTheTransactionRefuses() {
+        val envelope = envelope(seq = 1)
+        val stale = object : FreshnessStore {
+            override fun wouldAccept(contextId: String, lane: String, seq: Int, epoch: Int) = true
+            override fun accept(contextId: String, lane: String, seq: Int, epoch: Int) = false
+            override fun deliverIfFresh(contextId: String, lane: String, seq: Int, epoch: Int, deliver: () -> Unit) = false
+        }
+
+        var deliverRan = false
+        assertFailsWith<ReplayException> {
+            envelope.openAndValidate(provider, keys, "ctx", "device-1", stale) { deliverRan = true }
+        }
+        assertFalse(deliverRan, "a refused sequence must never reach the delivery callback")
     }
 
     @Test

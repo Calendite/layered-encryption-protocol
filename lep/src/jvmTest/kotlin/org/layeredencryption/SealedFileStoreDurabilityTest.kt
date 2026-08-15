@@ -215,6 +215,47 @@ class SealedFileStoreDurabilityTest {
         assertEquals(1, wins.count { (_, won) -> won() }, "exactly one instance may win the claim gate")
     }
 
+    /**
+     * The delivery-ordering contract (6ddd7e4 retest, finding 2), across store *instances*: two
+     * different sequences racing `deliverIfFresh` over one file may end 1-then-2, or 2 with 1
+     * refused — never 1 delivered after 2. The OS file lock is what serializes the decision.
+     */
+    @Test
+    fun aStaleSequenceIsNeverDeliveredAfterANewerOneAcrossInstances() {
+        repeat(10) {
+            val file = tempDir().resolve("freshness.sealed")
+            val instances = List(2) { FileBackedFreshnessStore.withoutRollbackDetection(file, provider, key) }
+            val delivered = java.util.Collections.synchronizedList(mutableListOf<Int>())
+            val barrier = CyclicBarrier(2)
+            instances.mapIndexed { index, store ->
+                val seq = index + 1
+                thread {
+                    barrier.await()
+                    store.deliverIfFresh("ctx", "lane", seq, 0) { delivered += seq }
+                }
+            }.forEach { it.join() }
+
+            assertTrue(
+                delivered == listOf(1, 2) || delivered == listOf(2),
+                "sequence 1 must never be delivered after sequence 2, got $delivered",
+            )
+        }
+    }
+
+    @Test
+    fun aFailedDeliveryTransactionRecordsNothingDurably() {
+        val file = tempDir().resolve("freshness.sealed")
+        val store = FileBackedFreshnessStore.withoutRollbackDetection(file, provider, key)
+
+        assertFailsWith<IllegalStateException> {
+            store.deliverIfFresh("ctx", "lane", 1, 0) { error("the application died mid-delivery") }
+        }
+
+        // Nothing was committed: the same sequence delivers on the re-send, even after a restart.
+        val reopened = FileBackedFreshnessStore.withoutRollbackDetection(file, provider, key)
+        assertTrue(reopened.deliverIfFresh("ctx", "lane", 1, 0) { })
+    }
+
     @Test
     fun acceptIsSingleWinnerAcrossInstancesSharingTheFile() {
         val file = tempDir().resolve("freshness.sealed")

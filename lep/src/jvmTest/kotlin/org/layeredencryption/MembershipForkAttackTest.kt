@@ -35,7 +35,7 @@ class MembershipForkAttackTest {
         append(provider, MembershipOp.ADD, subject, wrappedKeys = null, signer = signer.signingKeyPair)
 
     private fun MembershipLog.revoke(subject: DeviceIdentity, signer: DeviceKeys) =
-        append(provider, MembershipOp.REVOKE, subject, wrappedKeys = null, signer = signer.signingKeyPair)
+        revoke(provider, subject, provider.randomBytes(32), signer.signingKeyPair)
 
     private fun MembershipLog.isValid() = verify(provider) is MembershipVerification.Valid
     private fun MembershipLog.activeMembers() =
@@ -112,8 +112,8 @@ class MembershipForkAttackTest {
             .append(provider, MembershipOp.ADD, b.identity, null, signer = owner.signingKeyPair)
             .append(provider, MembershipOp.ADD, cc.identity, null, signer = owner.signingKeyPair)
 
-        val branchRevokesB = base.append(provider, MembershipOp.REVOKE, b.identity, null, signer = owner.signingKeyPair)
-        val branchRevokesC = base.append(provider, MembershipOp.REVOKE, cc.identity, null, signer = owner.signingKeyPair)
+        val branchRevokesB = base.revoke(provider, b.identity, provider.randomBytes(32), owner.signingKeyPair)
+        val branchRevokesC = base.revoke(provider, cc.identity, provider.randomBytes(32), owner.signingKeyPair)
 
         val fork = assertIs<Reconciliation.Forked>(branchRevokesB.reconcile(provider, branchRevokesC))
         assertTrue(b.identity.signingPublicKey.toHexString() in fork.revokedMembers, "B's revoke survives")

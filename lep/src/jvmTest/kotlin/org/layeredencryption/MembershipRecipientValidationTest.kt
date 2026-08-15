@@ -92,10 +92,12 @@ class MembershipRecipientValidationTest {
     }
 
     @Test
-    fun aKeylessRevocationStaysLegal() {
-        // Fork resolution batches its removals under one final rotation, so a REVOKE with no
-        // keys of its own must continue to verify.
+    fun aKeylessRevocationIsLegalOnlyInsideATerminatedBatch() {
+        // Fork resolution batches its removals under one final rotation. The batch as a whole is
+        // valid; its prefix — where somebody reads as revoked while the old key stays current —
+        // must not be presentable as a state of its own (6ddd7e4 retest, finding 1).
         val keyless = log.append(provider, MembershipOp.REVOKE, c.identity, null, a.signingKeyPair)
-        assertIs<MembershipVerification.Valid>(keyless.verify(provider))
+        assertIs<MembershipVerification.Invalid>(keyless.verify(provider))
+        assertIs<MembershipVerification.Valid>(keyless.rotate(provider, provider.randomBytes(32), signer = a).verify(provider))
     }
 }

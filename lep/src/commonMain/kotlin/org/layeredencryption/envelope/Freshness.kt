@@ -26,31 +26,49 @@ class ReplayException(message: String) : Exception(message)
  *
  * ### Production contract
  * The production implementation on JVM/Android is
- * `org.layeredencryption.storage.FileBackedFreshnessStore` (RT-03): [accept] is a durable atomic
- * compare-and-advance, fsync'd before it returns true, atomic across processes, and
- * rollback-evident via a revision witness — a restored old snapshot, which silently re-enables
- * every replay this store had refused, fails loudly instead. [InMemoryFreshnessStore] is the
- * in-memory reference used in tests; its state dies with the process.
+ * `org.layeredencryption.storage.FileBackedFreshnessStore` (RT-03): [deliverIfFresh] and
+ * [accept] are durable atomic transactions, fsync'd before they return true, atomic across
+ * processes, and rollback-evident via a revision witness — a restored old snapshot, which
+ * silently re-enables every replay this store had refused, fails loudly instead.
+ * [InMemoryFreshnessStore] is the in-memory reference used in tests; its state dies with the
+ * process.
  *
- * Whatever the store, consumers must stay idempotent by `(context, lane, seq)`: a crash between
- * a successful accept and the application applying the operation loses that delivery, and the
- * peer's re-send is the recovery path.
+ * The delivery contract (`6ddd7e4` retest, finding 2): the freshness *decision*, the
+ * application taking custody, and the watermark advance are one serialized transaction per
+ * store. Delivery is at-least-once — a crash after the callback but before the watermark
+ * commits re-delivers exactly once on re-send — so callbacks must be idempotent by
+ * `(context, lane, seq)`. What can never happen: a sequence delivered after a higher sequence
+ * on its lane already committed, because the decision is re-checked inside the transaction.
  */
 interface FreshnessStore {
 
     /**
      * Cheap pre-check with **no recording**: would this `(seq, epoch)` currently be accepted for
      * the lane? Called before decryption so a replayed envelope is rejected at header-read cost.
-     * Advisory only — [accept] re-checks atomically.
+     * Advisory only — [deliverIfFresh] re-checks atomically.
      */
     fun wouldAccept(contextId: String, lane: String, seq: Int, epoch: Int): Boolean
 
     /**
      * Atomically checks and records: accepts iff `seq` is strictly greater than the lane's
      * highest accepted sequence and `epoch` is not below its highest accepted epoch. Exactly one
-     * of two racing calls with the same `seq` wins.
+     * of two racing calls with the same `seq` wins. Prefer [deliverIfFresh] when the acceptance
+     * must be tied to the application taking custody of a plaintext.
      */
     fun accept(contextId: String, lane: String, seq: Int, epoch: Int): Boolean
+
+    /**
+     * The delivery transaction: re-checks freshness while no competing sequence can race the
+     * decision, runs [deliver], and advances the watermark only after it returns. Returns false
+     * — **without invoking [deliver]** — when the sequence went stale between the caller's
+     * advisory check and the transaction, which is precisely the window where an unserialized
+     * caller would apply a stale operation after a newer one.
+     *
+     * [deliver] runs under the store's transaction and must not call back into the store. If it
+     * throws, nothing is recorded and the exception propagates — the sequence stays fresh for
+     * the peer's re-send.
+     */
+    fun deliverIfFresh(contextId: String, lane: String, seq: Int, epoch: Int, deliver: () -> Unit): Boolean
 }
 
 /** The reference [FreshnessStore]: in-memory, lock-synchronised. State dies with the process. */
@@ -64,15 +82,26 @@ class InMemoryFreshnessStore : FreshnessStore {
         lock.withLock { admissible(lanes[contextId to lane], seq, epoch) }
 
     override fun accept(contextId: String, lane: String, seq: Int, epoch: Int): Boolean = lock.withLock {
+        acceptLocked(contextId, lane, seq, epoch)
+    }
+
+    override fun deliverIfFresh(contextId: String, lane: String, seq: Int, epoch: Int, deliver: () -> Unit): Boolean =
+        lock.withLock {
+            if (!admissible(lanes[contextId to lane], seq, epoch)) return@withLock false
+            deliver()
+            acceptLocked(contextId, lane, seq, epoch)
+        }
+
+    private fun acceptLocked(contextId: String, lane: String, seq: Int, epoch: Int): Boolean {
         val current = lanes[contextId to lane]
-        if (!admissible(current, seq, epoch)) return@withLock false
+        if (!admissible(current, seq, epoch)) return false
         if (current == null) {
             lanes[contextId to lane] = Watermark(seq, epoch)
         } else {
             current.seq = seq
             current.epoch = epoch
         }
-        true
+        return true
     }
 
     private fun admissible(current: Watermark?, seq: Int, epoch: Int): Boolean =

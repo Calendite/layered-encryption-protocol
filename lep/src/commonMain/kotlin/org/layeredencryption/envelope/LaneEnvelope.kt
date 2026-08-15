@@ -166,16 +166,19 @@ class LaneEnvelope(
      * 2. a `(seq, epoch)` the [freshness] store would refuse — replays, duplicate or regressed
      *    sequences, and retired epochs die at header-read cost, before the cascade runs.
      *
-     * **[deliver] is where the application takes durable custody of the plaintext**, and the
-     * watermark advances only after it returns. That ordering is the crash contract: die
-     * before or inside [deliver] and the envelope is still fresh, so the peer's re-send simply
-     * delivers it; die after [deliver] but before the watermark commits and the re-send
-     * re-delivers it exactly once. Either way an authenticated operation is never *lost* —
-     * which is why [deliver] must be idempotent per `(context, lane, seq)`: at-least-once is
-     * the deliberate choice, because the watermark-first alternative silently discards an
-     * operation whenever a crash lands in the window, with retransmission refused as stale.
-     * The same idempotency covers two in-process racers of one envelope: each may deliver, the
-     * watermark advances once.
+     * **[deliver] is where the application takes durable custody of the plaintext**, and it
+     * runs inside the freshness store's delivery transaction: the decision is re-checked where
+     * no competing sequence can race it, and the watermark advances only after [deliver]
+     * returns. The crash contract: die before or inside [deliver] and the envelope is still
+     * fresh, so the peer's re-send simply delivers it; die after [deliver] but before the
+     * watermark commits and the re-send re-delivers it exactly once. An authenticated
+     * operation is never *lost* — which is why [deliver] must be idempotent per
+     * `(context, lane, seq)`: at-least-once is the deliberate choice, because the
+     * watermark-first alternative silently discards an operation whenever a crash lands in the
+     * window, with retransmission refused as stale. And an operation is never applied *out of
+     * order*: a sequence that went stale between the advisory check and the transaction — a
+     * concurrently committed higher sequence on its lane — is refused before [deliver] runs.
+     * [deliver] must not call back into the [freshness] store.
      *
      * Authentication still precedes any recording — unauthenticated garbage with a high
      * sequence number must not burn a lane's sequences and suppress real operations.
@@ -206,11 +209,17 @@ class LaneEnvelope(
         }
 
         val plaintext = openWithoutReplayProtection(provider, keys, namespace)
-        val delivered = deliver(plaintext)
 
-        // The watermark advances last, and losing this atomic race is not an error: the racer
-        // that won also delivered, and delivery is idempotent by contract.
-        freshness.accept(contextId, lane, seq, epoch)
-        return delivered
+        // Decision, delivery, and watermark are one store transaction (the 6ddd7e4 retest,
+        // finding 2): the freshness check is re-run where no competing sequence can race it, so
+        // a lower sequence that lost the race is refused *before* delivery instead of being
+        // applied after a newer operation. Decryption stays outside the transaction — it is
+        // expensive and needs no serialization.
+        val delivered = ArrayList<T>(1)
+        val fresh = freshness.deliverIfFresh(contextId, lane, seq, epoch) { delivered += deliver(plaintext) }
+        if (!fresh) {
+            throw ReplayException("Envelope for lane '$lane' seq=$seq went stale before delivery")
+        }
+        return delivered.single()
     }
 }

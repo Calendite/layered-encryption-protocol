@@ -469,7 +469,9 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             )
         }
 
-        val resolvedActive = (resolved.verify(provider, namespace) as MembershipVerification.Valid).activeMembers
+        // Computed arithmetically, not by re-verifying: mid-construction the log deliberately
+        // fails verification — a keyless batch is only valid once its rotation lands.
+        val resolvedActive = winnerActive - toRevoke.toSet()
         val loserTailAdds = loser.entriesAfter(outcome.sharedPrefix)
             .filter { it.op == MembershipOp.ADD }
             .map { it.deviceIdentity.signingPublicKey.toHexString() }
@@ -572,6 +574,17 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
      * Verifies the full chain: each entry chains to the previous hash, its signature is valid, its
      * subject identity binding is valid, and its signer was an active member *before* the entry was
      * applied (genesis self-signs). Returns the resulting active-member set, or the first failure.
+     *
+     * **Keyless revocations are only valid inside a terminated batch** (the `6ddd7e4` retest,
+     * finding 1): a keyless `REVOKE` may be followed only by another keyless `REVOKE` or by the
+     * `ROTATE` that excludes everyone the batch removed, and a log may not end mid-batch. An
+     * append-only log's weakness is that a *prefix* of it is also a correctly signed log — so an
+     * untrusted relay could otherwise truncate a resolved fork just before its rotation and
+     * deliver a state where a member reads as revoked while everyone keeps sealing under the key
+     * that member still holds. Making the truncated prefix unverifiable makes suppression an
+     * availability problem again instead of a confidentiality one, and it makes a standalone
+     * keyless revocation — ejection with no cryptographic exclusion — impossible to present as a
+     * valid state at all.
      */
     fun verify(provider: CryptoProvider, namespace: ProtocolNamespace = ProtocolNamespace.Default): MembershipVerification {
         // An empty log has no genesis and therefore no founder; every other method here assumes
@@ -580,6 +593,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
 
         val members = mutableSetOf<String>()
         var expectedPrevious = MembershipEntry.GENESIS_PREVIOUS_HASH
+        var inKeylessBatch = false
 
         entriesSnapshot.forEachIndexed { index, entry ->
             if (!entry.previousHash.contentEquals(expectedPrevious)) {
@@ -591,11 +605,21 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             if (!HybridSignature.verify(provider, entry.signerPublicKey, entry.unsignedBytes(namespace), entry.signature)) {
                 return MembershipVerification.Invalid("Invalid signature", index)
             }
+            if (inKeylessBatch && !(entry.op == MembershipOp.REVOKE && !entry.hasWrappedKeys) && entry.op != MembershipOp.ROTATE) {
+                return MembershipVerification.Invalid("A keyless revocation batch must terminate in its rotation", index)
+            }
             val authorisationFailure = checkAuthorisation(index, entry, members)
             if (authorisationFailure != null) return MembershipVerification.Invalid(authorisationFailure, index)
 
             applyOp(entry, members)
+            inKeylessBatch = entry.op == MembershipOp.REVOKE && !entry.hasWrappedKeys
             expectedPrevious = entry.hash(provider, namespace)
+        }
+        if (inKeylessBatch) {
+            return MembershipVerification.Invalid(
+                "Log ends in an unterminated keyless revocation — truncated before its rotation",
+                entriesSnapshot.lastIndex,
+            )
         }
         return MembershipVerification.Valid(members.toSet())
     }

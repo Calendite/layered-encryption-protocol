@@ -11,12 +11,13 @@ import java.nio.file.Path
  * The production [FreshnessStore] (RT-03): per-`(context, lane)` watermarks in one sealed,
  * crash-safe, rollback-evident file (see [SealedStateFile] for the storage discipline).
  *
- * [accept] is a durable atomic compare-and-advance: when it returns `true`, the advanced
- * watermark is fsync'd on disk and mirrored to the witness, so process death immediately after
- * cannot resurrect the envelope. The consumer-side contract from the retest still applies and
- * belongs to the *caller*: a crash after decryption but before the application applies the
- * operation re-delivers nothing (the watermark is already advanced), so apply-then-accept
- * orderings must be idempotent by `(context, lane, seq)`.
+ * [deliverIfFresh] is the delivery transaction, held under the store's OS file lock: the
+ * freshness decision is re-checked, the callback takes custody, and the advanced watermark is
+ * fsync'd and witnessed — in that order, atomically even across processes sharing the file. A
+ * crash before the commit leaves the sequence fresh for the peer's re-send (at-least-once, so
+ * callbacks are idempotent by `(context, lane, seq)`); a stale sequence is refused without the
+ * callback ever running, which is what stops a lower sequence being applied after a
+ * concurrently committed higher one.
  *
  * [key] must come from the platform keystore in production; on Android keep [file] and the
  * witness under `noBackupFilesDir` — a restored freshness store silently re-enables every replay
@@ -69,6 +70,18 @@ class FileBackedFreshnessStore private constructor(
         engine.transact { loaded, commit ->
             val lanes = parse(loaded.state)
             if (!admissible(lanes[contextId to lane], seq, epoch)) return@transact false
+            lanes[contextId to lane] = Watermark(seq, epoch)
+            commit(serialise(lanes))
+            true
+        }
+
+    override fun deliverIfFresh(contextId: String, lane: String, seq: Int, epoch: Int, deliver: () -> Unit): Boolean =
+        engine.transact { loaded, commit ->
+            val lanes = parse(loaded.state)
+            if (!admissible(lanes[contextId to lane], seq, epoch)) return@transact false
+            // Custody first, commit second, all under the file lock: a throw here aborts with
+            // nothing recorded, and no competing sequence can slip between decision and commit.
+            deliver()
             lanes[contextId to lane] = Watermark(seq, epoch)
             commit(serialise(lanes))
             true
