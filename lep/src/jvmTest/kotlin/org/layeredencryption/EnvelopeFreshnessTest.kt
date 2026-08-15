@@ -28,7 +28,7 @@ class EnvelopeFreshnessTest {
         LaneEnvelope.seal(provider, keys, "ctx", lane, seq, payload.encodeToByteArray())
 
     private fun LaneEnvelope.openFresh(store: InMemoryFreshnessStore, keys: EpochKeys = this@EnvelopeFreshnessTest.keys) =
-        openAndValidate(provider, keys, "ctx", "device-1", store)
+        openAndValidate(provider, keys, "ctx", "device-1", store) { it }
 
     // ── The assessment's list ─────────────────────────────────────────────────────────────────
 
@@ -66,10 +66,10 @@ class EnvelopeFreshnessTest {
     fun wrongContextAndWrongLaneAreRejectedBeforeDecryption() {
         val store = InMemoryFreshnessStore()
         val other = LaneEnvelope.seal(provider, keys, "other-ctx", "device-1", 1, "x".encodeToByteArray())
-        assertFailsWith<ReplayException> { other.openAndValidate(provider, keys, "ctx", "device-1", store) }
+        assertFailsWith<ReplayException> { other.openAndValidate(provider, keys, "ctx", "device-1", store) { it } }
 
         val otherLane = envelope(seq = 1, lane = "device-2")
-        assertFailsWith<ReplayException> { otherLane.openAndValidate(provider, keys, "ctx", "device-1", store) }
+        assertFailsWith<ReplayException> { otherLane.openAndValidate(provider, keys, "ctx", "device-1", store) { it } }
     }
 
     @Test
@@ -103,10 +103,10 @@ class EnvelopeFreshnessTest {
         }
         val store = InMemoryFreshnessStore()
         val envelope = envelope(seq = 1)
-        envelope.openAndValidate(counting, keys, "ctx", "device-1", store)
+        envelope.openAndValidate(counting, keys, "ctx", "device-1", store) { it }
 
         counting.opens = 0
-        assertFailsWith<ReplayException> { envelope.openAndValidate(counting, keys, "ctx", "device-1", store) }
+        assertFailsWith<ReplayException> { envelope.openAndValidate(counting, keys, "ctx", "device-1", store) { it } }
         assertEquals(0, counting.opens, "a replay must be rejected before any decryption work")
     }
 
@@ -123,7 +123,7 @@ class EnvelopeFreshnessTest {
     }
 
     @Test
-    fun concurrentOpensOfTheSameSequenceAcceptExactlyOne() {
+    fun concurrentOpensOfTheSameSequenceSpendItExactlyOnce() {
         repeat(10) {
             val store = InMemoryFreshnessStore()
             val envelope = envelope(seq = 1)
@@ -136,8 +136,31 @@ class EnvelopeFreshnessTest {
                 }
             }.forEach { it.join() }
 
-            assertEquals(1, results.count { it == true }, "exactly one concurrent open may accept a sequence")
+            // Depending on how the race fell, one or both racers delivered (delivery is
+            // idempotent by contract); what must hold is that at least one did and the
+            // sequence is spent afterwards.
+            assertTrue(results.count { it == true } >= 1, "somebody must deliver the envelope")
+            assertFailsWith<ReplayException> { envelope.openFresh(store) }
         }
+    }
+
+    /**
+     * The crash contract (retest §2): the watermark advances only after delivery, so an
+     * application that dies before durably taking custody has not spent the sequence — the
+     * peer's re-send recovers the operation instead of being refused as stale.
+     */
+    @Test
+    fun aFailedDeliveryLeavesTheEnvelopeFresh() {
+        val store = InMemoryFreshnessStore()
+        val envelope = envelope(seq = 1)
+
+        assertFailsWith<IllegalStateException> {
+            envelope.openAndValidate(provider, keys, "ctx", "device-1", store) {
+                error("the application died before persisting")
+            }
+        }
+
+        assertContentEquals("op-1".encodeToByteArray(), envelope.openFresh(store))
     }
 
     @Test
@@ -147,11 +170,11 @@ class EnvelopeFreshnessTest {
 
         // Another lane in the same context starts its own watermark.
         LaneEnvelope.seal(provider, keys, "ctx", "device-2", 1, "x".encodeToByteArray())
-            .openAndValidate(provider, keys, "ctx", "device-2", store)
+            .openAndValidate(provider, keys, "ctx", "device-2", store) { it }
 
         // Same lane name in a different context is independent too.
         LaneEnvelope.seal(provider, keys, "ctx2", "device-1", 1, "x".encodeToByteArray())
-            .openAndValidate(provider, keys, "ctx2", "device-1", store)
+            .openAndValidate(provider, keys, "ctx2", "device-1", store) { it }
     }
 
     @Test

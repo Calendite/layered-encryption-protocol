@@ -357,26 +357,40 @@ class Joiner(
             throw PairingException("Inviter device-identity binding is invalid")
         }
         val encapsulation = XWing.encapsulate(provider, hello.xWingPublicKey)
-        val transcript = PairingTranscript(
-            inviterXWingPublicKey = hello.xWingPublicKey,
-            inviterDeviceIdentity = hello.inviterDeviceIdentity.serialise(),
-            kemCiphertext = encapsulation.ciphertext,
-            joinerDeviceIdentity = device.identity.serialise(),
-            sasCommitment = hello.sasCommitment,
-            namespace = namespace,
-        )
-        val handshakeKey = Handshake.handshakeKey(provider, encapsulation.sharedSecret, transcript)
-        val codeSecret = Handshake.codeSecret(provider, code.canonical, namespace)
+        var handshakeKey: ByteArray? = null
+        var codeSecret: ByteArray? = null
+        var transferred = false
+        try {
+            val transcript = PairingTranscript(
+                inviterXWingPublicKey = hello.xWingPublicKey,
+                inviterDeviceIdentity = hello.inviterDeviceIdentity.serialise(),
+                kemCiphertext = encapsulation.ciphertext,
+                joinerDeviceIdentity = device.identity.serialise(),
+                sasCommitment = hello.sasCommitment,
+                namespace = namespace,
+            )
+            handshakeKey = Handshake.handshakeKey(provider, encapsulation.sharedSecret, transcript)
+            codeSecret = Handshake.codeSecret(provider, code.canonical, namespace)
 
-        this.handshakeKey = handshakeKey
-        this.sasCommitment = hello.sasCommitment
-        this.sharedSecret = encapsulation.sharedSecret
-        this.transcript = transcript
-        this.expectedInviterMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.INVITER)
-        val joinerMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.JOINER)
-        codeSecret.fill(0)
-        stage = JoinerStage.AWAITING_CONFIRM
-        return JoinerResponse(encapsulation.ciphertext, device.identity, joinerMac)
+            this.handshakeKey = handshakeKey
+            this.sasCommitment = hello.sasCommitment
+            this.sharedSecret = encapsulation.sharedSecret
+            this.transcript = transcript
+            transferred = true
+            this.expectedInviterMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.INVITER)
+            val joinerMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.JOINER)
+            stage = JoinerStage.AWAITING_CONFIRM
+            return JoinerResponse(encapsulation.ciphertext, device.identity, joinerMac)
+        } finally {
+            // The shared secret and handshake key survive only by transferring into session
+            // fields, which destroy() owns from then on; a throw before the transfer must scrub
+            // them here, and the code secret never survives the call at all (RT-05).
+            codeSecret?.fill(0)
+            if (!transferred) {
+                encapsulation.sharedSecret.fill(0)
+                handshakeKey?.fill(0)
+            }
+        }
     }
 
     /**

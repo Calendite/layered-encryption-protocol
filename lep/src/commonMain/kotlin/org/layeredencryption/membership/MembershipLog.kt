@@ -90,10 +90,12 @@ sealed interface Reconciliation {
 sealed interface ForkResolution {
     /**
      * The fork is resolved: adopt [log] and nothing else. If [newMasterKey] is non-null the
-     * context key was rotated and this is its current value, also readable by every surviving
-     * member via [MembershipLog.rotatedKeysFor]; null means the fork changed nothing that key
-     * material depends on (typically two devices' concurrent resolutions of the same fork
-     * converging) and the winner was adopted as-is.
+     * context key was rotated **exactly one epoch** — resolution's revocations carry no
+     * rotations of their own, so `epochKeys.withNextEpoch(newMasterKey)` and adopting via
+     * [MembershipLog.rotatedKeysFor] land every surviving device on the same epoch number,
+     * whichever path it takes. Null means the fork changed nothing that key material depends
+     * on (typically two devices' concurrent resolutions of the same fork converging) and the
+     * winner was adopted as-is.
      *
      * [revoked] is everyone resolution itself revoked: union members still active on the winning
      * branch plus condemned-sponsor additions. [lostAdditions] is members added on the losing
@@ -404,11 +406,12 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
      *    revoked by the fork — directly or transitively, a puppet sponsoring a puppet — is
      *    revoked too. This is what stops a padded branch's sock-puppet members outliving the
      *    attacker who added them. Additions sponsored by surviving members are kept.
-     * 3. **Key material is rotated.** If resolution revoked anyone, or a losing-tail addition
-     *    held wrapped keys and did not survive, the log ends with a [rotate] whose fresh key is
-     *    sealed only to post-resolution members. A fork that changed nothing adopts the winner
-     *    with no rotation, which is what lets two devices' concurrent resolutions converge
-     *    instead of rotating forever.
+     * 3. **Key material rotates exactly once.** If resolution revoked anyone, or a losing-tail
+     *    addition held wrapped keys and did not survive, the log ends with a single [rotate]
+     *    whose fresh key is sealed only to post-resolution members — the resolution `REVOKE`s
+     *    themselves carry no keys, so one fork costs one epoch however many members it removes.
+     *    A fork that changed nothing adopts the winner with no rotation, which is what lets two
+     *    devices' concurrent resolutions converge instead of rotating forever.
      *
      * Returns [ForkResolution.ResolverExcluded] when [resolver] is condemned by the fork or absent
      * from the winning branch: a device with no post-resolution membership has no authority, it
@@ -444,14 +447,23 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
 
         // The resolver survives every step below (it is not condemned), so no revocation can
         // empty the calendar. Sorted order keeps concurrent resolvers byte-comparable in intent.
+        //
+        // Resolution revocations deliberately carry no rotation of their own: the single ROTATE
+        // below does all the key work, so resolving a fork advances **exactly one epoch** however
+        // many members it removes. Per-revocation rotations here would advance the log by more
+        // epochs than [ForkResolution.Resolved.newMasterKey] accounts for, and honest devices
+        // updating by different means would disagree on epoch numbering. No envelope is ever
+        // sealed between these entries — the resolved log is constructed and adopted atomically —
+        // so no interim epoch is ever missed.
         val identityByHex = winner.activeIdentities(provider).associateBy { it.signingPublicKey.toHexString() }
         val toRevoke = condemned.filter { it in winnerActive }.sorted()
         var resolved = winner
         for (hex in toRevoke) {
-            resolved = resolved.revoke(
+            resolved = resolved.append(
                 provider = provider,
-                removed = identityByHex.getValue(hex),
-                newMasterKey = provider.randomBytes(WrappedKeys.CONTEXT_KEY_BYTES),
+                op = MembershipOp.REVOKE,
+                deviceIdentity = identityByHex.getValue(hex),
+                wrappedKeys = null,
                 signer = resolver.signingKeyPair,
                 namespace = namespace,
             )
@@ -616,14 +628,41 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             // branch carrying its revocation. Making the transition itself invalid means such a
             // branch never verifies, so it can never reach reconciliation.
             MembershipOp.ADD -> if (subject in members) return "Re-adding an active member"
-            MembershipOp.REVOKE -> if (subject !in members) return "Revoking a non-member"
+            // A keyed revocation must rotate to exactly the survivors: omitting an active member
+            // would leave them a member the log vouches for who can never read another epoch — a
+            // silent membership/key partition — and including the revoked subject (or a stranger)
+            // would hand the new key to precisely who the entry exists to exclude. Keyless
+            // revocations stay legal: fork resolution batches its removals under one rotation.
+            MembershipOp.REVOKE -> {
+                if (subject !in members) return "Revoking a non-member"
+                if (entry.hasWrappedKeys) {
+                    checkRecipients(entry, members - subject, "Revocation")?.let { return it }
+                }
+            }
             // A rotation names its own signer as subject — there is no third party to speak
             // about — and one that carries no keys rotates to nobody, which would let an entry
             // masquerade as a rekey while quietly orphaning every member.
             MembershipOp.ROTATE -> {
                 if (subject != entry.signerPublicKey.toHexString()) return "Rotation subject must be its signer"
                 if (!entry.hasWrappedKeys) return "Rotation must carry wrapped keys"
+                checkRecipients(entry, members, "Rotation")?.let { return it }
             }
+        }
+        return null
+    }
+
+    /**
+     * The wrapped-key recipient rule for rotation-carrying entries: exactly the [expected] member
+     * set, no omissions, no extras, no duplicates, and the blob must parse. `ADD` entries are
+     * deliberately outside this rule — their payload is a Cascade blob for the added device (the
+     * async approval path), not a [WrappedKeys] bundle.
+     */
+    private fun checkRecipients(entry: MembershipEntry, expected: Set<String>, what: String): String? {
+        val wrapped = entry.wrappedKeys ?: return "$what is missing its wrapped keys"
+        val recipients = WrappedKeys.recipientsOrNull(wrapped) ?: return "$what carries malformed wrapped keys"
+        if (recipients.size != recipients.toSet().size) return "$what wraps a duplicate recipient"
+        if (recipients.toSet() != expected) {
+            return "$what must wrap the key for exactly the active members it leaves behind"
         }
         return null
     }

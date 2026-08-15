@@ -39,7 +39,7 @@ class ReadmeExamplesTest {
         val keys = EpochKeys.founding(masterKey)
         val freshness = InMemoryFreshnessStore()
         val envelope = LaneEnvelope.seal(provider, keys, "context-1", "lane-1", 1, plaintext = myBytes)
-        val bytes = envelope.openAndValidate(provider, keys, "context-1", "lane-1", freshness)
+        val bytes = envelope.openAndValidate(provider, keys, "context-1", "lane-1", freshness) { it }
         assertContentEquals(myBytes, bytes)
     }
 

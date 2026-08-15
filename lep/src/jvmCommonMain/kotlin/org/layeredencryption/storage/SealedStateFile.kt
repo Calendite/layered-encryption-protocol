@@ -63,11 +63,15 @@ class FileRevisionWitness(
 
     override fun latest(): Long? {
         if (!Files.exists(file)) return null
+        if (Files.size(file) > MAX_WITNESS_BYTES) {
+            throw StoreCorruptionException("Revision witness at $file is implausibly large")
+        }
         val bytes = Files.readAllBytes(file)
         try {
             val reader = FrameReader(bytes)
             val revisionBytes = reader.readBytes(8)
             val mac = reader.readBytes(64)
+            require(!reader.hasRemaining()) { "Trailing bytes after the witness MAC" }
             if (!provider.hmacSha256(key, WITNESS_LABEL + revisionBytes).constantTimeEquals(mac)) {
                 throw StoreCorruptionException("Revision witness MAC failed: $file")
             }
@@ -92,6 +96,7 @@ class FileRevisionWitness(
 
     private companion object {
         val WITNESS_LABEL = "lep/storage/revision-witness/v1".encodeToByteArray()
+        const val MAX_WITNESS_BYTES = 4096L
     }
 }
 
@@ -120,6 +125,12 @@ internal class SealedStateFile(
     private val witness: RevisionWitness?,
     private val namespace: ProtocolNamespace,
 ) {
+    init {
+        require(key.size == AT_REST_KEY_BYTES) {
+            "The at-rest key must be $AT_REST_KEY_BYTES bytes, was ${key.size}"
+        }
+    }
+
     private val key = key.copyOf()
     private val lockFile = file.resolveSibling(file.fileName.toString() + ".lock")
     private val tempFile = file.resolveSibling(file.fileName.toString() + ".tmp")
@@ -162,6 +173,10 @@ internal class SealedStateFile(
             return Loaded(0L, null)
         }
 
+        val size = Files.size(file)
+        if (size > MAX_STORE_BYTES) {
+            throw StoreCorruptionException("$storeKind store at $file is $size bytes; the cap is $MAX_STORE_BYTES")
+        }
         val bytes = Files.readAllBytes(file)
         val header: ByteArray
         val sealed: ByteArray
@@ -170,12 +185,14 @@ internal class SealedStateFile(
             val reader = FrameReader(bytes)
             header = reader.readBytes(MAX_HEADER_BYTES)
             sealed = reader.readBytes(Int.MAX_VALUE)
+            require(!reader.hasRemaining()) { "Trailing bytes after the sealed state" }
             val headerReader = FrameReader(header)
             val magic = headerReader.readBytes(MAGIC.size)
             require(magic.contentEquals(MAGIC)) { "Bad magic" }
             val kind = headerReader.readBytes(MAX_KIND_BYTES).decodeToString()
             require(kind == storeKind) { "Store kind is '$kind', expected '$storeKind'" }
             revision = u64FromBytes(headerReader.readBytes(8))
+            require(!headerReader.hasRemaining()) { "Trailing bytes after the header" }
         } catch (e: Exception) {
             throw StoreCorruptionException("$storeKind store at $file is unreadable", e)
         }
@@ -206,10 +223,19 @@ internal class SealedStateFile(
         witness?.record(revision)
     }
 
-    private companion object {
+    internal companion object {
         val MAGIC = "lep-sealed-store/v1".encodeToByteArray()
         const val MAX_HEADER_BYTES = 256
         const val MAX_KIND_BYTES = 64
+        const val AT_REST_KEY_BYTES = 32
+
+        /**
+         * Far above any real store (invites and watermarks are kilobytes), far below anything
+         * that could hurt to read: a corrupt or locally manipulated file fails on size before a
+         * byte of it is loaded.
+         */
+        const val MAX_STORE_BYTES = 16L * 1024 * 1024
+
         val processLocks = ConcurrentHashMap<String, ReentrantLock>()
     }
 }
@@ -222,7 +248,9 @@ private fun atomicWrite(target: Path, bytes: ByteArray, renameTo: Path? = null) 
         stage,
         StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING,
     ).use { channel ->
-        channel.write(ByteBuffer.wrap(bytes))
+        // The API permits short writes; a single unlooped write could stage a truncated store.
+        val buffer = ByteBuffer.wrap(bytes)
+        while (buffer.hasRemaining()) channel.write(buffer)
         channel.force(true)
     }
     Files.move(stage, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)

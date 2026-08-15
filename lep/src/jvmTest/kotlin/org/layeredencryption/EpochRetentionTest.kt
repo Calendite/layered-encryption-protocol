@@ -66,7 +66,7 @@ class EpochRetentionTest {
         assertFailsWith<CryptoException> { old.openWithoutReplayProtection(provider, pruned) }
         assertContentEquals(
             "new".encodeToByteArray(),
-            fresh.openAndValidate(provider, pruned, "ctx", "lane", InMemoryFreshnessStore()),
+            fresh.openAndValidate(provider, pruned, "ctx", "lane", InMemoryFreshnessStore()) { it },
         )
     }
 }

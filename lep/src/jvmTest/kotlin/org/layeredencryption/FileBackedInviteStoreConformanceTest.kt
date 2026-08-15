@@ -15,6 +15,6 @@ class FileBackedInviteStoreConformanceTest : InviteStoreConformanceTest() {
 
     override fun createStore(): InviteStore {
         val directory = Files.createTempDirectory("lep-invite-store")
-        return FileBackedInviteStore(directory.resolve("invites.sealed"), provider, provider.randomBytes(32))
+        return FileBackedInviteStore.withoutRollbackDetection(directory.resolve("invites.sealed"), provider, provider.randomBytes(32))
     }
 }

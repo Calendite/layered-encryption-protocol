@@ -20,15 +20,41 @@ import java.nio.file.Path
  * tombstoned across restarts — [put] refuses them permanently. [consume] is the single-winner
  * claim gate, atomic across instances and processes via the engine's file lock.
  */
-class FileBackedInviteStore(
-    file: Path,
-    provider: CryptoProvider,
-    key: ByteArray,
-    witness: RevisionWitness? = null,
-    namespace: ProtocolNamespace = ProtocolNamespace.Default,
+class FileBackedInviteStore private constructor(
+    private val engine: SealedStateFile,
 ) : InviteStore {
 
-    private val engine = SealedStateFile(file, provider, key, storeKind = "invite-store", witness, namespace)
+    /**
+     * The production constructor: rollback detection is required, not optional — an invite
+     * store without a witness silently resurrects consumed invites when a stale snapshot is
+     * restored. Storage without detection exists only under its honest name,
+     * [withoutRollbackDetection].
+     */
+    constructor(
+        file: Path,
+        provider: CryptoProvider,
+        key: ByteArray,
+        witness: RevisionWitness,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ) : this(SealedStateFile(file, provider, key, STORE_KIND, witness, namespace))
+
+    companion object {
+        /**
+         * A store whose rollback protection is somebody else's job — a platform without a second
+         * storage location, or a test. Restoring a stale snapshot of this store resurrects
+         * consumed invites without detection; the name is the consent form.
+         */
+        fun withoutRollbackDetection(
+            file: Path,
+            provider: CryptoProvider,
+            key: ByteArray,
+            namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        ): FileBackedInviteStore =
+            FileBackedInviteStore(SealedStateFile(file, provider, key, STORE_KIND, witness = null, namespace = namespace))
+
+        private const val STORE_KIND = "invite-store"
+        private const val MAX_FIELD = 4096
+    }
 
     private class State(
         val records: LinkedHashMap<String, PendingInvite>,
@@ -89,6 +115,7 @@ class FileBackedInviteStore(
             repeat(u32FromBytes(reader.readBytes(4))) {
                 state.tombstones += reader.readBytes(MAX_FIELD).decodeToString()
             }
+            require(!reader.hasRemaining()) { "Trailing bytes after the tombstones" }
         } catch (e: Exception) {
             throw StoreCorruptionException("Invite-store state failed to parse", e)
         }
@@ -111,7 +138,4 @@ class FileBackedInviteStore(
         return writer.toByteArray()
     }
 
-    private companion object {
-        const val MAX_FIELD = 4096
-    }
 }

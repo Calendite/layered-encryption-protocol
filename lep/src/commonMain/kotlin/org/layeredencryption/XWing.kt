@@ -73,21 +73,34 @@ object XWing {
     private fun expand(provider: CryptoProvider, secretKey: ByteArray): Expanded {
         require(secretKey.size == SECRET_KEY_SIZE) { "X-Wing secret key must be a $SECRET_KEY_SIZE-byte seed" }
         val expanded = provider.shake256(secretKey, EXPANDED_SIZE)
-        val d = expanded.copyOfRange(0, 32)
-        val z = expanded.copyOfRange(32, 64)
-        val skX = expanded.copyOfRange(64, 96)
+        var d: ByteArray? = null
+        var z: ByteArray? = null
+        var skX: ByteArray? = null
+        var mlkem: KeyPair? = null
+        var transferred = false
         try {
-            return Expanded(
-                mlkem = provider.mlKem768KeyPairFromSeed(d, z),
+            d = expanded.copyOfRange(0, 32)
+            z = expanded.copyOfRange(32, 64)
+            skX = expanded.copyOfRange(64, 96)
+            mlkem = provider.mlKem768KeyPairFromSeed(d, z)
+            val result = Expanded(
+                mlkem = mlkem,
                 x25519Secret = skX,
                 x25519Public = provider.x25519PublicKey(skX),
             )
+            transferred = true
+            return result
         } finally {
             // Everything here re-derives from the stored 32-byte seed on demand; no expansion
-            // by-product should outlive the call (RT-05).
+            // by-product should outlive the call (RT-05) — including on a provider throw partway
+            // through, which must not leave the parts already derived to the garbage collector.
             expanded.fill(0)
-            d.fill(0)
-            z.fill(0)
+            d?.fill(0)
+            z?.fill(0)
+            if (!transferred) {
+                skX?.fill(0)
+                mlkem?.privateKey?.fill(0)
+            }
         }
     }
 
@@ -135,26 +148,28 @@ object XWing {
         val (mlkemPk, x25519Pk) = splitPublicKey(peerPublicKey)
 
         val mlkem = provider.mlKem768Encapsulate(mlkemPk)
-        val ephemeral = provider.x25519GenerateKeyPair()
-        val x25519Shared = provider.x25519(ephemeral.privateKey, x25519Pk)
-
-        val sharedSecret = try {
-            combiner(
+        var ephemeral: KeyPair? = null
+        var x25519Shared: ByteArray? = null
+        try {
+            ephemeral = provider.x25519GenerateKeyPair()
+            x25519Shared = provider.x25519(ephemeral.privateKey, x25519Pk)
+            val sharedSecret = combiner(
                 provider = provider,
                 mlkemShared = mlkem.sharedSecret,
                 x25519Shared = x25519Shared,
                 x25519Ciphertext = ephemeral.publicKey,
                 x25519PublicKey = x25519Pk,
             )
+            val ciphertext = mlkem.ciphertext + ephemeral.publicKey
+            return KemEncapsulation(ciphertext = ciphertext, sharedSecret = sharedSecret)
         } finally {
             // Only the combined secret leaves this function; the component secrets and the
-            // ephemeral private scalar must not wait for the garbage collector (RT-05).
+            // ephemeral private scalar must not wait for the garbage collector (RT-05) — on the
+            // success path or on a provider throw partway through.
             mlkem.sharedSecret.fill(0)
-            x25519Shared.fill(0)
-            ephemeral.privateKey.fill(0)
+            x25519Shared?.fill(0)
+            ephemeral?.privateKey?.fill(0)
         }
-        val ciphertext = mlkem.ciphertext + ephemeral.publicKey
-        return KemEncapsulation(ciphertext = ciphertext, sharedSecret = sharedSecret)
     }
 
     /** Decapsulates a ciphertext with our 32-byte seed, recovering the same shared secret (draft §5.5). */
@@ -162,10 +177,11 @@ object XWing {
         val expanded = expand(provider, secretKey)
         val (mlkemCt, x25519Ct) = splitCiphertext(ciphertext)
 
-        val mlkemShared = provider.mlKem768Decapsulate(expanded.mlkem.privateKey, mlkemCt)
-        val x25519Shared = provider.x25519(expanded.x25519Secret, x25519Ct)
-
+        var mlkemShared: ByteArray? = null
+        var x25519Shared: ByteArray? = null
         try {
+            mlkemShared = provider.mlKem768Decapsulate(expanded.mlkem.privateKey, mlkemCt)
+            x25519Shared = provider.x25519(expanded.x25519Secret, x25519Ct)
             return combiner(
                 provider = provider,
                 mlkemShared = mlkemShared,
@@ -174,8 +190,8 @@ object XWing {
                 x25519PublicKey = expanded.x25519Public,
             )
         } finally {
-            mlkemShared.fill(0)
-            x25519Shared.fill(0)
+            mlkemShared?.fill(0)
+            x25519Shared?.fill(0)
             expanded.mlkem.privateKey.fill(0)
             expanded.x25519Secret.fill(0)
         }

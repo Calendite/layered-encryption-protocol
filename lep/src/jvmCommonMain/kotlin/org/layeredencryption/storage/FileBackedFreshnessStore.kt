@@ -22,15 +22,41 @@ import java.nio.file.Path
  * witness under `noBackupFilesDir` — a restored freshness store silently re-enables every replay
  * it had refused, which is precisely what the witness turns into a loud [StoreRollbackException].
  */
-class FileBackedFreshnessStore(
-    file: Path,
-    provider: CryptoProvider,
-    key: ByteArray,
-    witness: RevisionWitness? = null,
-    namespace: ProtocolNamespace = ProtocolNamespace.Default,
+class FileBackedFreshnessStore private constructor(
+    private val engine: SealedStateFile,
 ) : FreshnessStore {
 
-    private val engine = SealedStateFile(file, provider, key, storeKind = "freshness-store", witness, namespace)
+    /**
+     * The production constructor: rollback detection is required, not optional — a freshness
+     * store without a witness silently re-enables every refused replay when a stale snapshot is
+     * restored. Storage without detection exists only under its honest name,
+     * [withoutRollbackDetection].
+     */
+    constructor(
+        file: Path,
+        provider: CryptoProvider,
+        key: ByteArray,
+        witness: RevisionWitness,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ) : this(SealedStateFile(file, provider, key, STORE_KIND, witness, namespace))
+
+    companion object {
+        /**
+         * A store whose rollback protection is somebody else's job — a platform without a second
+         * storage location, or a test. Restoring a stale snapshot of this store re-enables every
+         * replay it had refused, without detection; the name is the consent form.
+         */
+        fun withoutRollbackDetection(
+            file: Path,
+            provider: CryptoProvider,
+            key: ByteArray,
+            namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        ): FileBackedFreshnessStore =
+            FileBackedFreshnessStore(SealedStateFile(file, provider, key, STORE_KIND, witness = null, namespace = namespace))
+
+        private const val STORE_KIND = "freshness-store"
+        private const val MAX_FIELD = 4096
+    }
 
     private class Watermark(val seq: Int, val epoch: Int)
 
@@ -63,6 +89,7 @@ class FileBackedFreshnessStore(
                 val epoch = u32FromBytes(reader.readBytes(4))
                 lanes[context to lane] = Watermark(seq, epoch)
             }
+            require(!reader.hasRemaining()) { "Trailing bytes after the watermarks" }
         } catch (e: Exception) {
             throw StoreCorruptionException("Freshness-store state failed to parse", e)
         }
@@ -80,7 +107,4 @@ class FileBackedFreshnessStore(
         return writer.toByteArray()
     }
 
-    private companion object {
-        const val MAX_FIELD = 4096
-    }
 }

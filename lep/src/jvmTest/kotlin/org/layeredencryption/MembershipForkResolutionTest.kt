@@ -1,5 +1,7 @@
 package org.layeredencryption
 
+import org.layeredencryption.envelope.EpochKeys
+import org.layeredencryption.envelope.LaneEnvelope
 import org.layeredencryption.identity.DeviceKeys
 import org.layeredencryption.membership.ForkResolution
 import org.layeredencryption.membership.MembershipLog
@@ -8,6 +10,7 @@ import org.layeredencryption.membership.MembershipVerification
 import org.layeredencryption.membership.Reconciliation
 import org.layeredencryption.membership.WrappedKeys
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
@@ -229,6 +232,45 @@ class MembershipForkResolutionTest {
         assertTrue(convergence.revoked.isEmpty())
         assertTrue(convergence.lostAdditions.isEmpty())
         assertEquals(convergence.log.actives(), byA.log.actives())
+    }
+
+    /**
+     * One fork costs one epoch, however many members it removes (retest §1): the resolution
+     * `REVOKE`s carry no keys, so the resolver applying [ForkResolution.Resolved.newMasterKey]
+     * directly and a bystander adopting rotations from the log land on the same epoch number,
+     * and envelopes sealed by one survivor open on the other.
+     */
+    @Test
+    fun resolutionAdvancesExactlyOneEpochHoweverManyMembersItRemoves() {
+        val a = DeviceKeys.generate(provider)
+        val c = DeviceKeys.generate(provider)
+        val x = DeviceKeys.generate(provider)
+        val y = DeviceKeys.generate(provider)
+        val master = newKey()
+        val base = MembershipLog.found(provider, a.identity, a.signingKeyPair).add(c, a).add(x, a).add(y, a)
+
+        // Keyless branch tails, so the resolution's single ROTATE is the log's only rotation.
+        val branchA = base.append(provider, MembershipOp.REVOKE, x.identity, wrappedKeys = null, signer = a.signingKeyPair)
+        val branchC = base.append(provider, MembershipOp.REVOKE, y.identity, wrappedKeys = null, signer = c.signingKeyPair)
+
+        val resolved = assertIs<ForkResolution.Resolved>(branchA.resolveFork(provider, branchC, resolver = a))
+        val key = assertNotNull(resolved.newMasterKey)
+
+        // Bystander path: exactly one rotation to adopt, despite two revocations resolving.
+        val cRotations = resolved.log.rotatedKeysFor(provider, c)
+        assertEquals(1, cRotations.size, "one fork, one epoch, however many revocations")
+        val cKeys = EpochKeys.founding(master).withNextEpoch(cRotations.single())
+
+        // Resolver path: apply the returned key directly. Both land on the same epoch number.
+        val aKeys = EpochKeys.founding(master).withNextEpoch(key)
+        assertEquals(aKeys.current, cKeys.current, "both public paths agree on the epoch number")
+
+        // Sealed on one surviving device, opened on the other, at the agreed epoch.
+        val envelope = LaneEnvelope.seal(provider, aKeys, "ctx", "lane", 1, "post-fork".encodeToByteArray())
+        assertEquals(1, envelope.epoch)
+        assertContentEquals("post-fork".encodeToByteArray(), envelope.openWithoutReplayProtection(provider, cKeys))
+        assertFalse(resolved.log.handsKeyTo(x, key))
+        assertFalse(resolved.log.handsKeyTo(y, key))
     }
 
     // ── The ROTATE op itself ─────────────────────────────────────────────────────────────────

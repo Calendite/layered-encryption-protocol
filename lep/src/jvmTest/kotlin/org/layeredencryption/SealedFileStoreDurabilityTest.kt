@@ -49,13 +49,13 @@ class SealedFileStoreDurabilityTest {
         val file = tempDir().resolve("invites.sealed")
         val stored = invite(1)
 
-        val before = FileBackedInviteStore(file, provider, key)
+        val before = FileBackedInviteStore.withoutRollbackDetection(file, provider, key)
         before.put(stored)
         before.put(invite(9))
         assertTrue(before.consume(invite(9).ridAsyncHex))
 
         // "Restart": a brand-new instance over the same file.
-        val after = FileBackedInviteStore(file, provider, key)
+        val after = FileBackedInviteStore.withoutRollbackDetection(file, provider, key)
         val loaded = after.get(stored.ridAsyncHex) ?: error("a pending record must survive restart")
         assertContentEquals(stored.secret, loaded.secret)
         assertContentEquals(stored.masterKey, loaded.masterKey)
@@ -70,10 +70,10 @@ class SealedFileStoreDurabilityTest {
     fun freshnessWatermarksSurviveARestart() {
         val file = tempDir().resolve("freshness.sealed")
 
-        val before = FileBackedFreshnessStore(file, provider, key)
+        val before = FileBackedFreshnessStore.withoutRollbackDetection(file, provider, key)
         assertTrue(before.accept("ctx", "lane", seq = 5, epoch = 2))
 
-        val after = FileBackedFreshnessStore(file, provider, key)
+        val after = FileBackedFreshnessStore.withoutRollbackDetection(file, provider, key)
         assertFalse(after.accept("ctx", "lane", seq = 5, epoch = 2), "a replay must stay refused across restart")
         assertFalse(after.accept("ctx", "lane", seq = 4, epoch = 2), "a regressed sequence must stay refused")
         assertFalse(after.accept("ctx", "lane", seq = 6, epoch = 1), "a regressed epoch must stay refused")
@@ -86,14 +86,14 @@ class SealedFileStoreDurabilityTest {
     @Test
     fun aLeftoverTempFileFromACrashIsIgnoredAndCleaned() {
         val file = tempDir().resolve("invites.sealed")
-        val store = FileBackedInviteStore(file, provider, key)
+        val store = FileBackedInviteStore.withoutRollbackDetection(file, provider, key)
         store.put(invite(1))
 
         // Simulate dying mid-write: garbage staged where the next commit would rename from.
         val temp = file.resolveSibling(file.fileName.toString() + ".tmp")
         Files.write(temp, ByteArray(100) { 0x41 })
 
-        val reopened = FileBackedInviteStore(file, provider, key)
+        val reopened = FileBackedInviteStore.withoutRollbackDetection(file, provider, key)
         assertEquals(1, reopened.all().size, "the last committed state is intact")
         assertFalse(Files.exists(temp), "the torn staging file is deleted, not trusted")
     }
@@ -101,7 +101,7 @@ class SealedFileStoreDurabilityTest {
     @Test
     fun aFlippedByteFailsClosed() {
         val file = tempDir().resolve("freshness.sealed")
-        val store = FileBackedFreshnessStore(file, provider, key)
+        val store = FileBackedFreshnessStore.withoutRollbackDetection(file, provider, key)
         assertTrue(store.accept("ctx", "lane", 1, 0))
 
         val bytes = Files.readAllBytes(file)
@@ -115,10 +115,39 @@ class SealedFileStoreDurabilityTest {
     @Test
     fun theWrongKeyFailsClosed() {
         val file = tempDir().resolve("invites.sealed")
-        FileBackedInviteStore(file, provider, key).put(invite(1))
+        FileBackedInviteStore.withoutRollbackDetection(file, provider, key).put(invite(1))
 
-        val wrongKey = FileBackedInviteStore(file, provider, provider.randomBytes(32))
+        val wrongKey = FileBackedInviteStore.withoutRollbackDetection(file, provider, provider.randomBytes(32))
         assertFailsWith<StoreCorruptionException> { wrongKey.all() }
+    }
+
+    @Test
+    fun truncationTrailingBytesAndOversizeAllFailClosed() {
+        val file = tempDir().resolve("freshness.sealed")
+        val store = FileBackedFreshnessStore.withoutRollbackDetection(file, provider, key)
+        assertTrue(store.accept("ctx", "lane", 1, 0))
+        val intact = Files.readAllBytes(file)
+
+        Files.write(file, intact.copyOf(intact.size - 3))
+        assertFailsWith<StoreCorruptionException> { store.wouldAccept("ctx", "lane", 2, 0) }
+
+        Files.write(file, intact + ByteArray(5))
+        assertFailsWith<StoreCorruptionException> { store.wouldAccept("ctx", "lane", 2, 0) }
+
+        Files.write(file, ByteArray(17 * 1024 * 1024))
+        assertFailsWith<StoreCorruptionException> { store.wouldAccept("ctx", "lane", 2, 0) }
+
+        // The checks reject broken bytes, not the store: the intact bytes still work.
+        Files.write(file, intact)
+        assertFalse(store.wouldAccept("ctx", "lane", 1, 0))
+        assertTrue(store.wouldAccept("ctx", "lane", 2, 0))
+    }
+
+    @Test
+    fun aWrongLengthAtRestKeyIsRefusedAtConstruction() {
+        assertFailsWith<IllegalArgumentException> {
+            FileBackedFreshnessStore.withoutRollbackDetection(tempDir().resolve("f.sealed"), provider, provider.randomBytes(16))
+        }
     }
 
     // ── Rollback evidence ────────────────────────────────────────────────────────────────────
@@ -173,10 +202,10 @@ class SealedFileStoreDurabilityTest {
     @Test
     fun consumeIsSingleWinnerAcrossInstancesSharingTheFile() {
         val file = tempDir().resolve("invites.sealed")
-        FileBackedInviteStore(file, provider, key).put(invite(1))
+        FileBackedInviteStore.withoutRollbackDetection(file, provider, key).put(invite(1))
         val ridHex = invite(1).ridAsyncHex
 
-        val instances = List(4) { FileBackedInviteStore(file, provider, key) }
+        val instances = List(4) { FileBackedInviteStore.withoutRollbackDetection(file, provider, key) }
         val barrier = CyclicBarrier(instances.size)
         val wins = instances.map { store ->
             var won = false
@@ -189,7 +218,7 @@ class SealedFileStoreDurabilityTest {
     @Test
     fun acceptIsSingleWinnerAcrossInstancesSharingTheFile() {
         val file = tempDir().resolve("freshness.sealed")
-        val instances = List(4) { FileBackedFreshnessStore(file, provider, key) }
+        val instances = List(4) { FileBackedFreshnessStore.withoutRollbackDetection(file, provider, key) }
         val barrier = CyclicBarrier(instances.size)
         val wins = instances.map { store ->
             var won = false

@@ -92,7 +92,9 @@ val opened = Cascade.open(provider, masterKey, sealed, aad = context)
 val keys = EpochKeys.founding(masterKey)
 val freshness = InMemoryFreshnessStore()         // production JVM/Android: FileBackedFreshnessStore
 val envelope = LaneEnvelope.seal(provider, keys, contextId, lane, seq, plaintext = myBytes)
-val bytes = envelope.openAndValidate(provider, keys, contextId, lane, freshness)
+envelope.openAndValidate(provider, keys, contextId, lane, freshness) { bytes ->
+    persistDurably(bytes)  // the watermark advances only after this returns — crash-safe
+}
 ```
 
 Pairing, over any channel that can send and receive byte frames:

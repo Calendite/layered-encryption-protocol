@@ -484,7 +484,9 @@ class AsyncJoiner(
 
         val encapsulation = XWing.encapsulate(provider, bundle.inviteXWingPublicKey)
         var dh1: ByteArray? = null
+        var asyncKey: ByteArray? = null
         var macKey: ByteArray? = null
+        var asyncKeyTransferred = false
         try {
             dh1 = AsyncHandshake.contributoryDh(
                 provider, device.x25519IdentityPrivateKey, XWing.x25519PublicComponent(bundle.inviteXWingPublicKey),
@@ -492,7 +494,7 @@ class AsyncJoiner(
             val transcript = AsyncHandshake.transcript(
                 ridAsync, bundle.expiryEpochSeconds, bundle.inviteXWingPublicKey, bundle.deviceIdentityA, encapsulation.ciphertext, device.identity, namespace,
             )
-            val asyncKey = AsyncHandshake.asyncKey(provider, encapsulation.sharedSecret, dh1, transcript, namespace)
+            asyncKey = AsyncHandshake.asyncKey(provider, encapsulation.sharedSecret, dh1, transcript, namespace)
 
             shortAuthString = AsyncHandshake.shortAuthString(provider, encapsulation.sharedSecret, dh1, transcript, namespace)
             macKey = asyncKey + link.secret
@@ -500,6 +502,7 @@ class AsyncJoiner(
                 asyncKey = asyncKey,
                 expectedInviterMac = Handshake.mac(provider, macKey, transcript, PairingRole.INVITER),
             )
+            asyncKeyTransferred = true
             return AsyncJoinerResponse(
                 kemCiphertext = encapsulation.ciphertext,
                 deviceIdentityS = device.identity,
@@ -507,11 +510,14 @@ class AsyncJoiner(
                 joinerMac = Handshake.mac(provider, macKey, transcript, PairingRole.JOINER),
             )
         } finally {
-            // The async key transfers into the session context; its inputs do not survive the
-            // call (RT-05). A thrown contributory-DH guard must not leave the KEM secret behind.
+            // The async key survives only by transferring into the session context; its inputs do
+            // not survive the call at all (RT-05). A throw anywhere — the contributory-DH guard,
+            // a provider failure mid-derivation — must not leave the KEM secret, the DH output,
+            // or an untransferred key behind for the garbage collector.
             encapsulation.sharedSecret.fill(0)
             dh1?.fill(0)
             macKey?.fill(0)
+            if (!asyncKeyTransferred) asyncKey?.fill(0)
         }
     }
 

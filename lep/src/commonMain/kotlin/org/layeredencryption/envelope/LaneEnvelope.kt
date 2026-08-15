@@ -166,27 +166,35 @@ class LaneEnvelope(
      * 2. a `(seq, epoch)` the [freshness] store would refuse — replays, duplicate or regressed
      *    sequences, and retired epochs die at header-read cost, before the cascade runs.
      *
-     * Only after the AEAD tags verify is the watermark advanced, atomically — recording before
-     * authentication would let unauthenticated garbage with a high sequence number burn the
-     * lane's sequences and suppress real operations. The consequence is documented honestly: a
-     * crash between decryption and recording can re-deliver one operation after restart, so
-     * consumers should be idempotent per `(lane, seq)`; the alternative — at-most-once via
-     * record-first — hands a denial-of-service primitive to anyone who can send bytes.
+     * **[deliver] is where the application takes durable custody of the plaintext**, and the
+     * watermark advances only after it returns. That ordering is the crash contract: die
+     * before or inside [deliver] and the envelope is still fresh, so the peer's re-send simply
+     * delivers it; die after [deliver] but before the watermark commits and the re-send
+     * re-delivers it exactly once. Either way an authenticated operation is never *lost* —
+     * which is why [deliver] must be idempotent per `(context, lane, seq)`: at-least-once is
+     * the deliberate choice, because the watermark-first alternative silently discards an
+     * operation whenever a crash lands in the window, with retransmission refused as stale.
+     * The same idempotency covers two in-process racers of one envelope: each may deliver, the
+     * watermark advances once.
+     *
+     * Authentication still precedes any recording — unauthenticated garbage with a high
+     * sequence number must not burn a lane's sequences and suppress real operations.
      *
      * What this deliberately does not decide: whether a sequence *gap* is relay suppression or
      * ordinary not-yet-delivered reordering, and whether the lane's author is still an active
-     * member — adopt membership via `MembershipLog.reconcile` and check
-     * `activeIdentities` before honouring a lane; both remain the consumer's synchronisation
-     * policy, stated here so the boundary is explicit rather than implied.
+     * member — adopt membership via `MembershipLog.resolveFork` and check `activeIdentities`
+     * before honouring a lane; both remain the consumer's synchronisation policy, stated here
+     * so the boundary is explicit rather than implied.
      */
-    fun openAndValidate(
+    fun <T> openAndValidate(
         provider: CryptoProvider,
         keys: EpochKeys,
         expectedContextId: String,
         expectedLane: String,
         freshness: FreshnessStore,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
-    ): ByteArray {
+        deliver: (ByteArray) -> T,
+    ): T {
         if (contextId != expectedContextId) {
             throw ReplayException("Envelope is for context '$contextId', expected '$expectedContextId'")
         }
@@ -198,11 +206,11 @@ class LaneEnvelope(
         }
 
         val plaintext = openWithoutReplayProtection(provider, keys, namespace)
+        val delivered = deliver(plaintext)
 
-        if (!freshness.accept(contextId, lane, seq, epoch)) {
-            // Lost an atomic race to a concurrent open of the same (lane, seq): a replay.
-            throw ReplayException("Envelope for lane '$lane' seq=$seq was concurrently accepted")
-        }
-        return plaintext
+        // The watermark advances last, and losing this atomic race is not an error: the racer
+        // that won also delivered, and delivery is idempotent by contract.
+        freshness.accept(contextId, lane, seq, epoch)
+        return delivered
     }
 }

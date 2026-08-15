@@ -122,6 +122,14 @@ object WrappedKeys {
     fun recipientsOf(blob: ByteArray): List<String> =
         runCatching { parse(blob).map { it.memberId } }.getOrDefault(emptyList())
 
+    /**
+     * Like [recipientsOf], but a malformed blob is null rather than an empty list — verification
+     * needs to tell "no recipients" apart from "unparseable", because both must fail and for
+     * different stated reasons.
+     */
+    internal fun recipientsOrNull(blob: ByteArray): List<String>? =
+        runCatching { parse(blob).map { it.memberId } }.getOrNull()
+
     private class Copy(val memberId: String, val kemCiphertext: ByteArray, val sealed: ByteArray)
 
     /**
