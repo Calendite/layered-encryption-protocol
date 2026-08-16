@@ -29,7 +29,13 @@ enum class CharacterClass(val logName: String) {
     FORMAT("format_chars"),
     SEPARATOR("separators"),
     COMBINING_MARK("combining_marks"),
-    EMOJI_PRESENTATION("emoji_basic"),
+
+    /**
+     * Pictographic characters — emoji and emoji-capable symbols alike. Whether one *defaults* to
+     * emoji presentation is the `emoji_presentation` flag rather than a second class, and
+     * whether one stands alone or composes into a longer sequence is a Layer-3 feature; a
+     * character on its own cannot answer either question.
+     */
     PICTOGRAPHIC("pictographic"),
     LETTER("letters"),
     NUMBER("numbers"),
@@ -67,9 +73,15 @@ enum class SequenceFeature(val logName: String) {
     EMOJI_TEXT_DEFAULT("emoji_text_default"),
     EMOJI_BMP("emoji_bmp"),
     EMOJI_NON_BMP("emoji_non_bmp"),
+
+    /** A single-code-point emoji standing on its own: no selector, no modifier, no ZWJ. */
+    EMOJI_BASIC("emoji_basic"),
     VS16_SEQUENCE("emoji_vs16_sequence"),
     VS15_SEQUENCE("emoji_vs15_sequence"),
     MODIFIER_SEQUENCE("emoji_modifier_sequence"),
+
+    /** A digit, `#` or `*` **acting as** a keycap base — contextual, hence a sequence feature. */
+    KEYCAP_BASE("emoji_keycap_base"),
     ZWJ_SEQUENCE("emoji_zwj_sequence"),
     MULTI_ZWJ_SEQUENCE("emoji_multi_zwj_sequence"),
     FLAG_SEQUENCE("emoji_flag_sequence"),
@@ -235,6 +247,7 @@ class CharacterProfile private constructor(
                     cp in KEYCAP_BASES &&
                         (nextIs(codePoints, index + 1, KEYCAP) ||
                             (nextIs(codePoints, index + 1, VS16) && nextIs(codePoints, index + 2, KEYCAP))) -> {
+                        bumpSeq(SequenceFeature.KEYCAP_BASE)
                         bumpSeq(SequenceFeature.KEYCAP_SEQUENCE)
                         index += if (nextIs(codePoints, index + 1, KEYCAP)) 2 else 3
                     }
@@ -281,6 +294,7 @@ class CharacterProfile private constructor(
                     isEmoji(index) -> {
                         var units = 0
                         var zwjJoins = 0
+                        var decorated = false
                         var sawGender = false
                         var sawHair = false
                         var scan = index
@@ -288,12 +302,13 @@ class CharacterProfile private constructor(
                             if (codePoints[scan] in GENDER_SIGNS) sawGender = true
                             var next = scan + 1
                             when {
-                                nextIs(codePoints, next, VS16) -> { bumpSeq(SequenceFeature.VS16_SEQUENCE); next++ }
-                                nextIs(codePoints, next, VS15) -> { bumpSeq(SequenceFeature.VS15_SEQUENCE); next++ }
+                                nextIs(codePoints, next, VS16) -> { bumpSeq(SequenceFeature.VS16_SEQUENCE); decorated = true; next++ }
+                                nextIs(codePoints, next, VS15) -> { bumpSeq(SequenceFeature.VS15_SEQUENCE); decorated = true; next++ }
                             }
                             if (isModifier(next)) {
                                 if (isModifierBase(scan)) bumpSeq(SequenceFeature.MODIFIER_SEQUENCE)
                                 else bumpSeq(SequenceFeature.BROKEN_EMOJI_SEQUENCE)
+                                decorated = true
                                 next++
                             }
                             units++
@@ -311,6 +326,7 @@ class CharacterProfile private constructor(
                             index = next
                             break
                         }
+                        if (zwjJoins == 0 && !decorated && units == 1) bumpSeq(SequenceFeature.EMOJI_BASIC)
                         if (zwjJoins >= 1) bumpSeq(SequenceFeature.ZWJ_SEQUENCE)
                         if (zwjJoins >= 2) bumpSeq(SequenceFeature.MULTI_ZWJ_SEQUENCE)
                         if (zwjJoins >= 1 && sawGender) bumpSeq(SequenceFeature.GENDER_SEQUENCE)

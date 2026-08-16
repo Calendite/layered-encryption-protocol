@@ -26,7 +26,7 @@ CLASSES = [
     "SURROGATE", "NONCHARACTER", "REPLACEMENT_CHARACTER", "PRIVATE_USE", "UNASSIGNED",
     "REGIONAL_INDICATOR", "TAG_CHARACTER", "VARIATION_SELECTOR", "BIDI_CONTROL", "FORMAT",
     "SEPARATOR", "COMBINING_MARK",
-    "EMOJI_PRESENTATION", "PICTOGRAPHIC",
+    "PICTOGRAPHIC",
     "LETTER", "NUMBER", "PUNCTUATION", "SYMBOL",
     "OTHER",
 ]
@@ -160,9 +160,7 @@ def main():
             return CLASS_ID["SEPARATOR"]
         if category in ("Mn", "Mc", "Me"):
             return CLASS_ID["COMBINING_MARK"]
-        if emoji_flags[cp] & FLAG_EMOJI_PRESENTATION:
-            return CLASS_ID["EMOJI_PRESENTATION"]
-        if emoji_flags[cp] & FLAG_EXTENDED_PICTOGRAPHIC:
+        if emoji_flags[cp] & (FLAG_EMOJI_PRESENTATION | FLAG_EXTENDED_PICTOGRAPHIC):
             return CLASS_ID["PICTOGRAPHIC"]
         if category.startswith("L"):
             return CLASS_ID["LETTER"]

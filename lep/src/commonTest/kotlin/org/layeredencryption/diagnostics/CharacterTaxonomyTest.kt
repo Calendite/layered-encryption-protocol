@@ -56,6 +56,34 @@ class CharacterTaxonomyTest {
     private fun profile(text: String) = CharacterProfile.of(text)
 
     @Test
+    fun standaloneEmojiAreDistinguishedFromComposedOnes() {
+        // "Basic emoji": one code point, no selector, no modifier, no ZWJ.
+        for (basic in listOf("😀", "🚗", "🍕")) {
+            val p = profile(basic)
+            assertTrue(p.has(SequenceFeature.EMOJI_BASIC), "$basic is a single-code-point emoji")
+            assertTrue(p.has(SequenceFeature.EMOJI_NON_BMP), "and lives above the BMP")
+            assertFalse(p.has(SequenceFeature.ZWJ_SEQUENCE))
+        }
+        assertTrue(profile("☕").has(SequenceFeature.EMOJI_BMP), "coffee is a BMP emoji")
+
+        // Anything composed is not "basic", which is the distinction the schema draws.
+        for (composed in listOf("👍🏽", "👩‍💻", "❤️", "1️⃣", "🇬🇧")) {
+            assertFalse(profile(composed).has(SequenceFeature.EMOJI_BASIC), "$composed is composed, not basic")
+        }
+    }
+
+    @Test
+    fun keycapBasesAreReportedAlongsideTheirSequence() {
+        val keycap = profile("1️⃣")
+        assertTrue(keycap.has(SequenceFeature.KEYCAP_BASE), "the digit acts as a keycap base")
+        assertTrue(keycap.has(SequenceFeature.KEYCAP_SEQUENCE))
+        // The same digit outside a keycap is just a digit — the feature is contextual.
+        val plain = profile("1")
+        assertFalse(plain.has(SequenceFeature.KEYCAP_BASE))
+        assertTrue(plain.has(CharacterClass.ASCII_DIGIT))
+    }
+
+    @Test
     fun emojiSequencesAreRecognisedStructurally() {
         assertTrue(profile("👍🏽").has(SequenceFeature.MODIFIER_SEQUENCE), "thumbs up + skin tone")
         assertTrue(profile("👩‍💻").has(SequenceFeature.ZWJ_SEQUENCE), "woman technologist")
@@ -113,6 +141,73 @@ class CharacterTaxonomyTest {
         assertTrue(profile("ﬁ").has(CharFlag.COMPATIBILITY), "the fi ligature changes under NFKC")
         assertTrue(profile(" ").has(CharFlag.WHITE_SPACE), "NBSP is whitespace without being ASCII")
         assertTrue(profile("‮").has(CharacterClass.BIDI_CONTROL), "the RTL override is its own diagnostic class")
+    }
+
+    /**
+     * The schema is a contract: every log field the taxonomy advertises must be reachable by
+     * some real string, and no two fields may share a name. Without this, a field can quietly
+     * become unreportable — a sweep group nobody runs, or a log fingerprint that can never say
+     * the thing it promises.
+     */
+    @Test
+    fun everyAdvertisedLogFieldIsReachableAndUniquelyNamed() {
+        val allNames = CharacterClass.entries.map { it.logName } +
+            CharFlag.entries.map { it.logName } +
+            SequenceFeature.entries.map { it.logName }
+        assertEquals(allNames.size, allNames.toSet().size, "log field names must be unique across all three layers")
+
+        val witnesses = listOf(
+            // Layer 1: one witness per class, written as escapes so that no editor, terminal or
+            // transfer between machines can silently mangle an invisible or unassigned character.
+            "a", "7", ";", " ",
+            "\u0007",           // BEL: a C0 control
+            "\u0085",           // NEL: a C1 control
+            "\uD800",           // a lone high surrogate
+            "\uFDD0",           // a noncharacter
+            "\uFFFD",           // the replacement character
+            "\uE000",           // private use
+            "\u0378",           // unassigned in the BMP
+            "\uD83C\uDDEC",     // a regional indicator
+            "\uDB40\uDC67",     // a tag character
+            "\uFE0F",           // a variation selector
+            "\u202E",           // an RTL override: a bidi control
+            "\u200B",           // a zero-width space: format
+            "\u00A0",           // NBSP: a separator
+            "\u0301",           // a combining acute
+            "\u00E9",           // precomposed e-acute: a letter that decomposes
+            "\u0661",           // Arabic-Indic digit one: a non-ASCII number
+            "\u2014",           // an em dash: non-ASCII punctuation
+            "\u20AC",           // the euro sign: a symbol
+            "\uFB01",           // the fi ligature: a compatibility character
+            "\u65E5",           // a 3-byte CJK letter
+            "p\u0430",          // Latin p + Cyrillic a: mixed scripts
+            // Layer 3: one witness per emoji sequence shape.
+            "\uD83D\uDE00",                                     // a basic emoji
+            "\u2615",                                           // a BMP emoji
+            "\u2764",                                           // text-default emoji-capable
+            "\u2764\uFE0F",                                     // VS16 sequence
+            "\u2764\uFE0E",                                     // VS15 sequence
+            "\uD83D\uDC4D\uD83C\uDFFD",                         // modifier sequence
+            "\uD83D\uDC69\u200D\uD83D\uDCBB",                   // ZWJ sequence
+            "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67", // multi-ZWJ sequence
+            "\uD83C\uDDEC\uD83C\uDDE7",                         // flag sequence
+            "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F", // tag flag
+            "1\uFE0F\u20E3",                                    // keycap sequence
+            "\uD83C\uDFC3\u200D\u2640\uFE0F",                  // gendered sequence
+            "\uD83D\uDC68\u200D\uD83E\uDDB0",                   // hair component
+            "\uD83C\uDFFB",                                     // a lone skin tone: broken
+            "\uDC00",                                           // a lone low surrogate
+        )
+        val reached = buildSet {
+            for (witness in witnesses) {
+                val p = CharacterProfile.of(witness)
+                CharacterClass.entries.forEach { if (p.has(it)) add(it.logName) }
+                CharFlag.entries.forEach { if (p.has(it)) add(it.logName) }
+                SequenceFeature.entries.forEach { if (p.has(it)) add(it.logName) }
+            }
+        }
+        val unreachable = allNames.toSet() - reached - setOf(CharacterClass.OTHER.logName)
+        assertTrue(unreachable.isEmpty(), "no witness reaches: $unreachable")
     }
 
     @Test
