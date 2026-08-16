@@ -562,7 +562,9 @@ class AsyncJoiner(
             Diagnostics.warning(LepTag.INVITE, throwable = e) { "delivery rejected after the MAC gate" }
             throw e
         } catch (e: Exception) {
-            Diagnostics.warning(LepTag.INVITE) { "delivery rejected: malformed" }
+            // Raw parser/provider exceptions can embed the bytes they choked on, so the reference
+            // goes through the unsafe slot: dropped unless the sink opted in at install time.
+            Diagnostics.warning(LepTag.INVITE, unsafeThrowable = e) { "delivery rejected: malformed" }
             throw PairingException("Malformed delivery")
         }
         context.asyncKey.fill(0)

@@ -197,14 +197,16 @@ internal class SealedStateFile(
             revision = u64FromBytes(headerReader.readBytes(8))
             require(!headerReader.hasRemaining()) { "Trailing bytes after the header" }
         } catch (e: Exception) {
-            Diagnostics.error(LepTag.STORAGE, throwable = e) { "$storeKind store is unreadable — corruption" }
+            // Frame-parser messages can embed bytes decoded from the file, so the exception rides
+            // the unsafe slot: dropped unless the sink opted in at install time.
+            Diagnostics.error(LepTag.STORAGE, unsafeThrowable = e) { "$storeKind store is unreadable — corruption" }
             throw StoreCorruptionException("$storeKind store at $file is unreadable", e)
         }
 
         val state = try {
             Cascade.open(provider, key, sealed, aad = header, namespace = namespace)
         } catch (e: Exception) {
-            Diagnostics.error(LepTag.STORAGE) { "$storeKind store failed authentication — corruption or the wrong at-rest key" }
+            Diagnostics.error(LepTag.STORAGE, unsafeThrowable = e) { "$storeKind store failed authentication — corruption or the wrong at-rest key" }
             throw StoreCorruptionException("$storeKind store at $file failed authentication", e)
         }
         if (floor != null && revision < floor) {

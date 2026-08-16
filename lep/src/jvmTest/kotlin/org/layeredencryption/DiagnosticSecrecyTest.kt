@@ -8,6 +8,7 @@ import org.layeredencryption.envelope.InMemoryFreshnessStore
 import org.layeredencryption.envelope.LaneEnvelope
 import org.layeredencryption.envelope.ReplayException
 import org.layeredencryption.identity.DeviceKeys
+import org.layeredencryption.invite.AsyncDelivery
 import org.layeredencryption.invite.AsyncInviter
 import org.layeredencryption.invite.AsyncJoiner
 import org.layeredencryption.invite.ResponseOutcome
@@ -17,10 +18,13 @@ import org.layeredencryption.membership.MembershipOp
 import org.layeredencryption.pairing.Inviter
 import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
+import org.layeredencryption.pairing.PairingException
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -141,6 +145,37 @@ class DiagnosticSecrecyTest {
         for (expected in listOf("LepPairing", "LepInvite", "LepEnvelope", "LepMembership")) {
             assertTrue(expected in tags, "expected an emission from $expected, saw only $tags")
         }
+    }
+
+    /**
+     * The catch-all in `onDelivery` passes its raw parser exception through the *unsafe* slot:
+     * a default install drops it (the trace of a third-party exception can embed the bytes it
+     * choked on), while an install with `captureUnsafeThrowables = true` — a local debugging
+     * session — gets the full trace. Same code path, the installer chooses.
+     */
+    @Test
+    fun aRawParserExceptionSurfacesOnlyWhenTheInstallOptedIn() {
+        // A real ceremony up to the delivery, run silently so only the deliveries are recorded.
+        val asyncInviter = AsyncInviter.create(provider, DeviceKeys.generate(provider), nowEpochSeconds = 1_000, expiryEpochSeconds = 1_000 + 604_800)
+        val asyncJoiner = AsyncJoiner(provider, DeviceKeys.generate(provider))
+        val response = asyncJoiner.onBundle(asyncInviter.link, asyncInviter.bundle, 1_000)
+        assertIs<ResponseOutcome.Claimed>(asyncInviter.onResponse(response, 1_000))
+        val genuine = asyncInviter.approve()
+        // The right MAC over a garbage log: past the gate, into the parser.
+        val tampered = AsyncDelivery(genuine.inviterMac, byteArrayOf(1, 2, 3))
+
+        Diagnostics.install(sink, captureUnsafeThrowables = true)
+        assertFailsWith<PairingException> { asyncJoiner.onDelivery(tampered) }
+        val flagged = sink.events.single { it.message == "delivery rejected: malformed" }
+        assertNotNull(flagged.throwable, "the opted-in install should carry the raw cause")
+        assertTrue(flagged.throwable !is PairingException, "and it is the parser's own exception, not a sanitised wrapper")
+
+        Diagnostics.uninstall()
+        val plainSink = RecordingSink()
+        Diagnostics.install(plainSink)
+        assertFailsWith<PairingException> { asyncJoiner.onDelivery(tampered) }
+        val plain = plainSink.events.single { it.message == "delivery rejected: malformed" }
+        assertNull(plain.throwable, "a default install must drop the raw exception entirely")
     }
 
     @Test
