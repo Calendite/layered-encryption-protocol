@@ -1,6 +1,8 @@
 package org.layeredencryption.storage
 
+import dev.diagnostics.Diagnostics
 import org.layeredencryption.Cascade
+import org.layeredencryption.LepTag
 import org.layeredencryption.CryptoProvider
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
@@ -166,6 +168,7 @@ internal class SealedStateFile(
         val floor = witness?.latest()
         if (!Files.exists(file)) {
             if (floor != null && floor > 0L) {
+                Diagnostics.error(LepTag.STORAGE) { "$storeKind store is missing but its witness has seen revision $floor — rollback or deletion" }
                 throw StoreRollbackException(
                     "$storeKind store at $file is missing but its witness has seen revision $floor",
                 )
@@ -194,16 +197,19 @@ internal class SealedStateFile(
             revision = u64FromBytes(headerReader.readBytes(8))
             require(!headerReader.hasRemaining()) { "Trailing bytes after the header" }
         } catch (e: Exception) {
+            Diagnostics.error(LepTag.STORAGE, throwable = e) { "$storeKind store is unreadable — corruption" }
             throw StoreCorruptionException("$storeKind store at $file is unreadable", e)
         }
 
         val state = try {
             Cascade.open(provider, key, sealed, aad = header, namespace = namespace)
         } catch (e: Exception) {
+            Diagnostics.error(LepTag.STORAGE) { "$storeKind store failed authentication — corruption or the wrong at-rest key" }
             throw StoreCorruptionException("$storeKind store at $file failed authentication", e)
         }
         if (floor != null && revision < floor) {
             state.fill(0)
+            Diagnostics.error(LepTag.STORAGE) { "$storeKind store is at revision $revision but its witness has seen $floor — a restored stale snapshot" }
             throw StoreRollbackException(
                 "$storeKind store at $file is at revision $revision but its witness has seen $floor",
             )

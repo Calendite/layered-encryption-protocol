@@ -2,7 +2,9 @@ package org.layeredencryption.pairing
 
 import org.layeredencryption.Cascade
 import org.layeredencryption.envelope.EpochKeys
+import dev.diagnostics.Diagnostics
 import org.layeredencryption.CryptoProvider
+import org.layeredencryption.LepTag
 import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.XWing
@@ -221,8 +223,10 @@ class Inviter(
 
             val expectedJoinerMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.JOINER)
             if (!response.joinerMac.constantTimeEquals(expectedJoinerMac)) {
+                Diagnostics.warning(LepTag.PAIRING) { "joiner rejected: code-keyed MAC mismatch — wrong code or man-in-the-middle" }
                 throw PairingException("Joiner MAC mismatch — wrong code or man-in-the-middle")
             }
+            Diagnostics.debug(LepTag.PAIRING) { "joiner verified; awaiting both humans' SAS confirmation" }
 
             this.handshakeKey = handshakeKey
             handshakeKeyTransferred = true
@@ -401,10 +405,12 @@ class Joiner(
         requireStage(JoinerStage.AWAITING_CONFIRM)
         val expected = expectedInviterMac ?: throw PairingException("onInviterConfirm() called before the handshake")
         if (!confirm.inviterMac.constantTimeEquals(expected)) {
+            Diagnostics.warning(LepTag.PAIRING) { "inviter rejected: code-keyed MAC mismatch — wrong code or man-in-the-middle" }
             throw PairingException("Inviter MAC mismatch — wrong code or man-in-the-middle")
         }
         val commitment = sasCommitment ?: throw PairingException("onInviterConfirm() called before the handshake")
         if (!Handshake.opensSasCommitment(provider, commitment, confirm.sasNonce, namespace)) {
+            Diagnostics.warning(LepTag.PAIRING) { "inviter rejected: SAS nonce does not open the commitment — man-in-the-middle" }
             throw PairingException("SAS nonce does not open the inviter's commitment — man-in-the-middle")
         }
         val sharedSecret = sharedSecret ?: throw PairingException("onInviterConfirm() called before the handshake")

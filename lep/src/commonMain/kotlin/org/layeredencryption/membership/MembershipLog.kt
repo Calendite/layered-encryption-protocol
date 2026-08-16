@@ -1,5 +1,7 @@
 package org.layeredencryption.membership
 
+import dev.diagnostics.Diagnostics
+import org.layeredencryption.LepTag
 import org.layeredencryption.ProtocolLabels
 import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.ProtocolNamespace
@@ -428,6 +430,10 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         val outcome = reconcile(provider, other, namespace)
         if (outcome !is Reconciliation.Forked) return ForkResolution.NotForked(outcome)
 
+        Diagnostics.debug(LepTag.MEMBERSHIP) {
+            "fork: shared prefix ${outcome.sharedPrefix}, ${entriesSnapshot.size - outcome.sharedPrefix} ours vs " +
+                "${other.entriesSnapshot.size - outcome.sharedPrefix} theirs, union of ${outcome.revokedMembers.size} revocation(s)"
+        }
         val winner = if (outcome.theirsWins) other else this
         val loser = if (outcome.theirsWins) this else other
 
@@ -443,7 +449,10 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
 
         val winnerActive = (winner.verify(provider, namespace) as MembershipVerification.Valid).activeMembers
         val resolverHex = resolver.identity.signingPublicKey.toHexString()
-        if (resolverHex in condemned || resolverHex !in winnerActive) return ForkResolution.ResolverExcluded
+        if (resolverHex in condemned || resolverHex !in winnerActive) {
+            Diagnostics.warning(LepTag.MEMBERSHIP) { "fork resolution: this device is condemned or absent from the winner — no authority, re-pairing required" }
+            return ForkResolution.ResolverExcluded
+        }
 
         // The resolver survives every step below (it is not condemned), so no revocation can
         // empty the calendar. Sorted order keeps concurrent resolvers byte-comparable in intent.
@@ -487,6 +496,10 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         if (toRevoke.isNotEmpty() || droppedKeyHolders) {
             newMasterKey = provider.randomBytes(WrappedKeys.CONTEXT_KEY_BYTES)
             resolved = resolved.rotate(provider, newMasterKey, resolver, namespace)
+        }
+        Diagnostics.debug(LepTag.MEMBERSHIP) {
+            "fork resolved: ${toRevoke.size} revoked, ${lostAdditions.size} addition(s) lost, " +
+                if (newMasterKey != null) "rotated one epoch" else "no rotation needed"
         }
         return ForkResolution.Resolved(
             log = resolved,
@@ -609,7 +622,10 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
                 return MembershipVerification.Invalid("A keyless revocation batch must terminate in its rotation", index)
             }
             val authorisationFailure = checkAuthorisation(index, entry, members)
-            if (authorisationFailure != null) return MembershipVerification.Invalid(authorisationFailure, index)
+            if (authorisationFailure != null) {
+                Diagnostics.debug(LepTag.MEMBERSHIP) { "log invalid at entry $index: $authorisationFailure" }
+                return MembershipVerification.Invalid(authorisationFailure, index)
+            }
 
             applyOp(entry, members)
             inKeylessBatch = entry.op == MembershipOp.REVOKE && !entry.hasWrappedKeys

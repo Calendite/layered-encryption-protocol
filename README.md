@@ -150,6 +150,13 @@ one character silently orphans every existing pairing.
   write exactly the files you point them at, under a key you supply.
 - **Meaning.** It has no idea what your plaintext is, and this is on purpose: a library that
   knows about your domain cannot be reasoned about independently of it.
+- **A diagnostics sink, if you want one.** The protocol emits structured diagnostics through
+  [`kmp-diagnostics`](https://github.com/Calendite/kmp-diagnostics)' zero-dependency core —
+  tagged per subsystem (`LepTag`), **inert until your application installs a sink**, and
+  lambda-gated so no message is ever built when nothing is listening. No key material is ever
+  emitted, at any level: `DiagnosticSecrecyTest` runs full ceremonies against a recording sink
+  and asserts none of the run's secrets appears in any emission. Install nothing and the
+  library is exactly as silent as it always was.
 
 ## Key retention and post-compromise security
 

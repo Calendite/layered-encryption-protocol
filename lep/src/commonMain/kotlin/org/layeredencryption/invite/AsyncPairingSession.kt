@@ -1,7 +1,9 @@
 package org.layeredencryption.invite
 
 import org.layeredencryption.Cascade
+import dev.diagnostics.Diagnostics
 import org.layeredencryption.CryptoProvider
+import org.layeredencryption.LepTag
 import org.layeredencryption.KeyPair
 import org.layeredencryption.XWing
 import org.layeredencryption.identity.DeviceIdentity
@@ -199,6 +201,7 @@ class AsyncInviter private constructor(
             claim = evaluated.claim
             ownershipTransferred = true
             transitionTo(AsyncInviteState.CLAIMED)
+            Diagnostics.debug(LepTag.INVITE) { "invite claimed; awaiting the owner's approval" }
             return ResponseOutcome.Claimed(evaluated.shortAuthString, evaluated.joinerFingerprint)
         } finally {
             if (!ownershipTransferred) evaluated.claim.asyncKey.fill(0)
@@ -216,7 +219,10 @@ class AsyncInviter private constructor(
      * collector.
      */
     private fun evaluateResponse(response: AsyncJoinerResponse): Evaluated? {
-        if (!response.deviceIdentityS.verifyBinding(provider, namespace)) return null
+        if (!response.deviceIdentityS.verifyBinding(provider, namespace)) {
+            Diagnostics.warning(LepTag.INVITE) { "response rejected: joiner identity binding does not verify" }
+            return null
+        }
 
         var sharedSecret: ByteArray? = null
         var x25519Secret: ByteArray? = null
@@ -235,7 +241,10 @@ class AsyncInviter private constructor(
 
             macKey = asyncKey + secret
             val expectedJoinerMac = Handshake.mac(provider, macKey, transcript, PairingRole.JOINER)
-            if (!response.joinerMac.constantTimeEquals(expectedJoinerMac)) return null
+            if (!response.joinerMac.constantTimeEquals(expectedJoinerMac)) {
+                Diagnostics.warning(LepTag.INVITE) { "response rejected: joiner MAC mismatch — wrong link secret or tampering" }
+                return null
+            }
 
             val evaluated = Evaluated(
                 claim = Claim(asyncKey, transcript, response.deviceIdentityS),
@@ -269,6 +278,7 @@ class AsyncInviter private constructor(
             .append(provider, MembershipOp.ADD, claim.joiner, wrappedMasterKey, signer = device.signingKeyPair, namespace = namespace)
 
         transitionTo(AsyncInviteState.APPROVED)
+        Diagnostics.debug(LepTag.INVITE) { "invite approved: master key released with a founding membership log" }
         AsyncDelivery(inviterMac, log.serialise())
     }
 
@@ -476,11 +486,21 @@ class AsyncJoiner(
 
         // §2.7 step 2 — anti-directory: a relay that swapped the bundle fails here.
         if (!InviteLink.fingerprintOf(provider, bundle.deviceIdentityA).contentEquals(link.fingerprint)) {
+            Diagnostics.warning(LepTag.INVITE) { "bundle rejected: fingerprint does not match the link — a swapped bundle" }
             throw PairingException("Bundle fingerprint does not match the link")
         }
-        if (!bundle.deviceIdentityA.verifyBinding(provider, namespace)) throw PairingException("Bundle device-identity binding is invalid")
-        if (!bundle.verifySignature(provider, ridAsync, namespace)) throw PairingException("Bundle signature is invalid")
-        if (nowEpochSeconds > bundle.expiryEpochSeconds + CLOCK_SKEW_SECONDS) throw PairingException("Bundle has expired")
+        if (!bundle.deviceIdentityA.verifyBinding(provider, namespace)) {
+            Diagnostics.warning(LepTag.INVITE) { "bundle rejected: inviter identity binding does not verify" }
+            throw PairingException("Bundle device-identity binding is invalid")
+        }
+        if (!bundle.verifySignature(provider, ridAsync, namespace)) {
+            Diagnostics.warning(LepTag.INVITE) { "bundle rejected: signature does not verify" }
+            throw PairingException("Bundle signature is invalid")
+        }
+        if (nowEpochSeconds > bundle.expiryEpochSeconds + CLOCK_SKEW_SECONDS) {
+            Diagnostics.debug(LepTag.INVITE) { "bundle rejected: expired" }
+            throw PairingException("Bundle has expired")
+        }
 
         val encapsulation = XWing.encapsulate(provider, bundle.inviteXWingPublicKey)
         var dh1: ByteArray? = null
@@ -532,18 +552,22 @@ class AsyncJoiner(
     fun onDelivery(delivery: AsyncDelivery) {
         val context = context ?: throw PairingException("onDelivery() before onBundle()")
         if (!delivery.inviterMac.constantTimeEquals(context.expectedInviterMac)) {
+            Diagnostics.warning(LepTag.INVITE) { "delivery rejected: inviter MAC mismatch" }
             throw PairingException("Inviter MAC mismatch")
         }
 
         recoveredMasterKey = try {
             unwrapMasterKey(context, delivery)
         } catch (e: PairingException) {
+            Diagnostics.warning(LepTag.INVITE, throwable = e) { "delivery rejected after the MAC gate" }
             throw e
         } catch (e: Exception) {
+            Diagnostics.warning(LepTag.INVITE) { "delivery rejected: malformed" }
             throw PairingException("Malformed delivery")
         }
         context.asyncKey.fill(0)
         this.context = null
+        Diagnostics.debug(LepTag.INVITE) { "delivery accepted: context master key recovered" }
     }
 
     private fun unwrapMasterKey(context: Context, delivery: AsyncDelivery): ByteArray {

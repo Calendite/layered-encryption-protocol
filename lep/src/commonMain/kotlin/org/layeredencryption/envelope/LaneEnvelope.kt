@@ -2,7 +2,9 @@ package org.layeredencryption.envelope
 
 import org.layeredencryption.Cascade
 import org.layeredencryption.CryptoException
+import dev.diagnostics.Diagnostics
 import org.layeredencryption.CryptoProvider
+import org.layeredencryption.LepTag
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
 import org.layeredencryption.ProtocolLimits
@@ -199,12 +201,15 @@ class LaneEnvelope(
         deliver: (ByteArray) -> T,
     ): T {
         if (contextId != expectedContextId) {
+            Diagnostics.warning(LepTag.ENVELOPE) { "refused: envelope for context '$contextId' arrived where '$expectedContextId' was expected" }
             throw ReplayException("Envelope is for context '$contextId', expected '$expectedContextId'")
         }
         if (lane != expectedLane) {
+            Diagnostics.warning(LepTag.ENVELOPE) { "refused: envelope for lane '$lane' arrived where '$expectedLane' was expected" }
             throw ReplayException("Envelope is for lane '$lane', expected '$expectedLane'")
         }
         if (!freshness.wouldAccept(contextId, lane, seq, epoch)) {
+            Diagnostics.debug(LepTag.FRESHNESS) { "refused pre-decrypt: '$lane' seq=$seq epoch=$epoch is not fresh" }
             throw ReplayException("Stale envelope for lane '$lane': seq=$seq epoch=$epoch is not fresh")
         }
 
@@ -218,8 +223,10 @@ class LaneEnvelope(
         val delivered = ArrayList<T>(1)
         val fresh = freshness.deliverIfFresh(contextId, lane, seq, epoch) { delivered += deliver(plaintext) }
         if (!fresh) {
+            Diagnostics.debug(LepTag.FRESHNESS) { "refused at delivery: '$lane' seq=$seq lost the race to a newer sequence" }
             throw ReplayException("Envelope for lane '$lane' seq=$seq went stale before delivery")
         }
+        Diagnostics.debug(LepTag.ENVELOPE) { "delivered: '$lane' seq=$seq epoch=$epoch" }
         return delivered.single()
     }
 }
