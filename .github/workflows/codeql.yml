@@ -21,10 +21,25 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check out kmp-diagnostics (composite build dependency)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Calendite/kmp-diagnostics
+          path: kmp-diagnostics
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
       - uses: github/codeql-action/init@f3712979fa5f215279b101dd0a2e3bdfb4353324 # v3
         with:
           languages: java-kotlin
-          build-mode: none
+          # Kotlin cannot be extracted without a real compilation ('none' sees nothing), so the
+          # JVM target is compiled under CodeQL's tracer. It covers all production Kotlin: the
+          # Android flavour shares the same common and jvmCommon source sets.
+          build-mode: manual
+      - name: Compile the JVM target under the CodeQL tracer
+        run: ./gradlew :lep:compileKotlinJvm --console=plain --no-build-cache
       - uses: github/codeql-action/analyze@f3712979fa5f215279b101dd0a2e3bdfb4353324 # v3
         with:
           category: "/language:java-kotlin"
