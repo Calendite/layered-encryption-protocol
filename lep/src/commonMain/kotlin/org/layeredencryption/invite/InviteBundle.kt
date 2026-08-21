@@ -10,6 +10,7 @@ import org.layeredencryption.FrameWriter
 import org.layeredencryption.XWing
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.longToBigEndian8
+import org.layeredencryption.suite.Suite1
 
 /**
  * The signed pre-published bundle the inviter posts at `rid_async` (Async_Invites_Spec.md §2.4).
@@ -39,7 +40,7 @@ class InviteBundle(
 
     /** Verifies `sigA` over the §2.4 payload, binding in the recomputed [ridAsync]. */
     fun verifySignature(provider: CryptoProvider, ridAsync: ByteArray, namespace: ProtocolNamespace = ProtocolNamespace.Default): Boolean =
-        HybridSignature.verify(provider, deviceIdentityA.signingPublicKey, signedPayload(ridAsync, expiryEpochSeconds, _inviteXWingPublicKey, deviceIdentityA, namespace), _signature)
+        Suite1.signature.verify(provider, deviceIdentityA.signingPublicKey, signedPayload(ridAsync, expiryEpochSeconds, _inviteXWingPublicKey, deviceIdentityA, namespace), _signature)
 
     fun serialise(): ByteArray = FrameWriter()
         .putBytes(_inviteXWingPublicKey)
@@ -61,7 +62,7 @@ class InviteBundle(
             signer: KeyPair,
             namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): InviteBundle {
-            val signature = HybridSignature.sign(
+            val signature = Suite1.signature.sign(
                 provider,
                 signer.privateKey,
                 signedPayload(ridAsync, expiryEpochSeconds, inviteXWingPublicKey, deviceIdentityA, namespace),

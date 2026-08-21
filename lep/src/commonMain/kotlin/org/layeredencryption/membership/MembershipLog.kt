@@ -12,6 +12,7 @@ import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.identity.DeviceKeys
+import org.layeredencryption.suite.Suite1
 import org.layeredencryption.toHexString
 
 /** Membership operations (docs/Protocol.md §4.7). */
@@ -615,7 +616,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             if (!entry.deviceIdentity.verifyBinding(provider, namespace)) {
                 return MembershipVerification.Invalid("Invalid device-identity binding", index)
             }
-            if (!HybridSignature.verify(provider, entry.signerPublicKey, entry.unsignedBytes(namespace), entry.signature)) {
+            if (!Suite1.signature.verify(provider, entry.signerPublicKey, entry.unsignedBytes(namespace), entry.signature)) {
                 return MembershipVerification.Invalid("Invalid signature", index)
             }
             if (inKeylessBatch && !(entry.op == MembershipOp.REVOKE && !entry.hasWrappedKeys) && entry.op != MembershipOp.ROTATE) {
@@ -763,7 +764,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
                 deviceIdentity = deviceIdentity,
                 wrappedKeys = wrappedKeys,
                 signerPublicKey = signer.publicKey,
-                signature = HybridSignature.sign(provider, signer.privateKey, unsigned),
+                signature = Suite1.signature.sign(provider, signer.privateKey, unsigned),
             )
         }
     }

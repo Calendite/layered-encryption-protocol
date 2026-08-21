@@ -1,6 +1,5 @@
 package org.layeredencryption.membership
 
-import org.layeredencryption.Cascade
 import org.layeredencryption.CryptoProvider
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
@@ -12,6 +11,7 @@ import org.layeredencryption.XWing
 import org.layeredencryption.decodeUtf8Strict
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.identity.DeviceKeys
+import org.layeredencryption.suite.Suite1
 import org.layeredencryption.toHexString
 
 /**
@@ -87,11 +87,11 @@ object WrappedKeys {
         require(ids.toSet().size == ids.size) { "Duplicate recipient in wrap list" }
         val writer = FrameWriter()
         for (recipient in recipients) {
-            val encapsulation = XWing.encapsulate(provider, recipient.xWingPublicKey)
+            val encapsulation = Suite1.kem.encapsulate(provider, recipient.xWingPublicKey)
             val wrapKey = wrapKey(provider, encapsulation.sharedSecret, namespace)
             writer.putBytes(recipient.signingPublicKey.toHexString().encodeToByteArray())
             writer.putBytes(encapsulation.ciphertext)
-            writer.putBytes(Cascade.seal(provider, wrapKey, secret, aad = recipient.serialise(), namespace = namespace))
+            writer.putBytes(Suite1.aead.seal(provider, wrapKey, secret, aad = recipient.serialise(), namespace = namespace))
         }
         return writer.toByteArray()
     }
@@ -113,9 +113,9 @@ object WrappedKeys {
         val own = device.identity.signingPublicKey.toHexString()
         val mine = copies.firstOrNull { it.memberId == own } ?: return@runCatching null
 
-        val sharedSecret = XWing.decapsulate(provider, device.xWingPrivateKey, mine.kemCiphertext)
+        val sharedSecret = Suite1.kem.decapsulate(provider, device.xWingPrivateKey, mine.kemCiphertext)
         val wrapKey = wrapKey(provider, sharedSecret, namespace)
-        Cascade.open(provider, wrapKey, mine.sealed, aad = device.identity.serialise(), namespace = namespace)
+        Suite1.aead.open(provider, wrapKey, mine.sealed, aad = device.identity.serialise(), namespace = namespace)
     }.getOrNull()
 
     /** Which members a blob carries a copy for, without opening any of them. */

@@ -1,13 +1,13 @@
 package org.layeredencryption.storage
 
 import dev.diagnostics.Diagnostics
-import org.layeredencryption.Cascade
 import org.layeredencryption.LepTag
 import org.layeredencryption.CryptoProvider
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
 import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.pairing.constantTimeEquals
+import org.layeredencryption.suite.Suite1
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -204,7 +204,7 @@ internal class SealedStateFile(
         }
 
         val state = try {
-            Cascade.open(provider, key, sealed, aad = header, namespace = namespace)
+            Suite1.aead.open(provider, key, sealed, aad = header, namespace = namespace)
         } catch (e: Exception) {
             Diagnostics.error(LepTag.STORAGE, unsafeThrowable = e) { "$storeKind store failed authentication — corruption or the wrong at-rest key" }
             throw StoreCorruptionException("$storeKind store at $file failed authentication", e)
@@ -225,7 +225,7 @@ internal class SealedStateFile(
             .putBytes(storeKind.encodeToByteArray())
             .putBytes(u64ToBytes(revision))
             .toByteArray()
-        val sealed = Cascade.seal(provider, key, state, aad = header, namespace = namespace)
+        val sealed = Suite1.aead.seal(provider, key, state, aad = header, namespace = namespace)
         state.fill(0)
         atomicWrite(tempFile, FrameWriter().putBytes(header).putBytes(sealed).toByteArray(), file)
         witness?.record(revision)

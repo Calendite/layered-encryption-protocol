@@ -8,6 +8,7 @@ import org.layeredencryption.KeyPair
 import org.layeredencryption.XWing
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
+import org.layeredencryption.suite.Suite1
 
 /**
  * A device's long-term identity (Async_Invites_Spec.md §3).
@@ -76,7 +77,7 @@ class DeviceIdentity(
 
     /** Verifies the X25519↔signing-key binding, requiring both signature legs to pass. */
     fun verifyBinding(provider: CryptoProvider, namespace: ProtocolNamespace = ProtocolNamespace.Default): Boolean =
-        HybridSignature.verify(
+        Suite1.signature.verify(
             provider,
             _signingPublicKey,
             bindingMessage(_signingPublicKey, _x25519IdentityPublicKey, _xWingPublicKey, namespace),
@@ -194,10 +195,10 @@ class DeviceKeys(
             provider: CryptoProvider,
             namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): DeviceKeys {
-            val signing = HybridSignature.generateKeyPair(provider)
+            val signing = Suite1.signature.generateKeyPair(provider)
             val identityDh = provider.x25519GenerateKeyPair()
-            val kem = XWing.generateKeyPair(provider)
-            val bindingSignature = HybridSignature.sign(
+            val kem = Suite1.kem.generateKeyPair(provider)
+            val bindingSignature = Suite1.signature.sign(
                 provider,
                 signing.privateKey,
                 DeviceIdentity.bindingMessage(signing.publicKey, identityDh.publicKey, kem.publicKey, namespace),

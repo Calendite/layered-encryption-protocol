@@ -1,6 +1,5 @@
 package org.layeredencryption.envelope
 
-import org.layeredencryption.Cascade
 import org.layeredencryption.CryptoException
 import dev.diagnostics.Diagnostics
 import org.layeredencryption.CryptoProvider
@@ -10,6 +9,7 @@ import org.layeredencryption.FrameWriter
 import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.decodeUtf8Strict
+import org.layeredencryption.suite.Suite1
 
 /**
  * One encrypted op in a device's lane (docs/Protocol.md §7.1).
@@ -127,7 +127,7 @@ class LaneEnvelope(
             // caller sealing under a retired epoch and producing envelopes nobody can open.
             val epoch = keys.current
             val header = LaneEnvelope(VERSION, contextId, lane, seq, epoch, ByteArray(0))
-            val ciphertext = Cascade.seal(
+            val ciphertext = Suite1.aead.seal(
                 provider, keys.currentKey, plaintext, aad = header.associatedData(), namespace = namespace,
             )
             return LaneEnvelope(VERSION, contextId, lane, seq, epoch, ciphertext)
@@ -154,7 +154,7 @@ class LaneEnvelope(
         val key = keys[epoch] ?: throw CryptoException(
             "No key for epoch $epoch: this device was added after that rotation",
         )
-        return Cascade.open(provider, key, _ciphertext, aad = associatedData(), namespace = namespace)
+        return Suite1.aead.open(provider, key, _ciphertext, aad = associatedData(), namespace = namespace)
     }
 
     /**

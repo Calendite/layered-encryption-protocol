@@ -1,6 +1,5 @@
 package org.layeredencryption.pairing
 
-import org.layeredencryption.Cascade
 import org.layeredencryption.envelope.EpochKeys
 import dev.diagnostics.Diagnostics
 import org.layeredencryption.CryptoProvider
@@ -13,6 +12,7 @@ import org.layeredencryption.identity.DeviceKeys
 import org.layeredencryption.membership.MembershipLog
 import org.layeredencryption.membership.MembershipOp
 import org.layeredencryption.membership.MembershipVerification
+import org.layeredencryption.suite.Suite1
 import org.layeredencryption.toHexString
 
 /** Raised when a pairing cannot proceed — a MAC mismatch, an invalid log, or misuse of the state machine. */
@@ -138,7 +138,7 @@ class Inviter(
     /** Domain-separates every derivation in the ceremony (LEP-10); both sides must agree. */
     private val namespace: ProtocolNamespace = ProtocolNamespace.Default,
 ) {
-    private val xWingKeyPair = XWing.generateKeyPair(provider)
+    private val xWingKeyPair = Suite1.kem.generateKeyPair(provider)
     private var stage = InviterStage.AWAITING_HELLO
 
     /**
@@ -205,7 +205,7 @@ class Inviter(
         // Scrubbed on every exit (RT-05): a MAC mismatch throw must not leave the shared secret,
         // the code secret, or a rejected handshake key waiting for the garbage collector. The
         // handshake key alone survives, by transferring into the session field.
-        val sharedSecret = XWing.decapsulate(provider, xWingKeyPair.privateKey, response.kemCiphertext)
+        val sharedSecret = Suite1.kem.decapsulate(provider, xWingKeyPair.privateKey, response.kemCiphertext)
         var handshakeKey: ByteArray? = null
         var codeSecret: ByteArray? = null
         var handshakeKeyTransferred = false
@@ -266,7 +266,7 @@ class Inviter(
         if (confirmation.session !== this) throw PairingException("SAS confirmation belongs to a different session")
         val joiner = joinerDeviceIdentity ?: throw PairingException("complete() called before a joiner response")
         val handshakeKey = handshakeKey ?: throw PairingException("complete() called before the handshake")
-        val wrappedMasterKey = Cascade.seal(provider, handshakeKey, keys.serialise(), aad = joiner.serialise(), namespace = namespace)
+        val wrappedMasterKey = Suite1.aead.seal(provider, handshakeKey, keys.serialise(), aad = joiner.serialise(), namespace = namespace)
         val base = existing?.membershipLog
             ?: MembershipLog.found(provider, device.identity, device.signingKeyPair, namespace = namespace)
         val log = base.append(provider, MembershipOp.ADD, joiner, wrappedMasterKey, signer = device.signingKeyPair, namespace = namespace)
@@ -360,7 +360,7 @@ class Joiner(
         if (!hello.inviterDeviceIdentity.verifyBinding(provider, namespace)) {
             throw PairingException("Inviter device-identity binding is invalid")
         }
-        val encapsulation = XWing.encapsulate(provider, hello.xWingPublicKey)
+        val encapsulation = Suite1.kem.encapsulate(provider, hello.xWingPublicKey)
         var handshakeKey: ByteArray? = null
         var codeSecret: ByteArray? = null
         var transferred = false
@@ -454,7 +454,7 @@ class Joiner(
 
         val entry = log.addEntryFor(ownKey) ?: throw PairingException("No ADD entry for this device")
         val wrapped = entry.wrappedKeys ?: throw PairingException("No wrapped keys for this device")
-        val unwrapped = Cascade.open(provider, handshakeKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
+        val unwrapped = Suite1.aead.open(provider, handshakeKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
         recoveredKeys = EpochKeys.deserialise(unwrapped)
             ?: throw PairingException("The wrapped keys did not decode")
         membershipLog = log

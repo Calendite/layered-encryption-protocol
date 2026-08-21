@@ -1,6 +1,5 @@
 package org.layeredencryption.invite
 
-import org.layeredencryption.Cascade
 import dev.diagnostics.Diagnostics
 import org.layeredencryption.CryptoProvider
 import org.layeredencryption.LepTag
@@ -18,6 +17,7 @@ import org.layeredencryption.pairing.constantTimeEquals
 import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.ProtocolLock
 import org.layeredencryption.ProtocolNamespace
+import org.layeredencryption.suite.Suite1
 import org.layeredencryption.toHexString
 
 /** Invite lifecycle (Async_Invites_Spec.md §2.1). */
@@ -231,8 +231,8 @@ class AsyncInviter private constructor(
         var macKey: ByteArray? = null
         var asyncKeyTransferred = false
         try {
-            sharedSecret = XWing.decapsulate(provider, inviteXWing.privateKey, response.kemCiphertext)
-            x25519Secret = XWing.x25519SecretComponent(provider, inviteXWing.privateKey)
+            sharedSecret = Suite1.kem.decapsulate(provider, inviteXWing.privateKey, response.kemCiphertext)
+            x25519Secret = Suite1.kem.x25519SecretComponent(provider, inviteXWing.privateKey)
             dh1 = AsyncHandshake.contributoryDh(provider, x25519Secret, response.deviceIdentityS.x25519IdentityPublicKey)
             val transcript = AsyncHandshake.transcript(
                 ridAsync, expiryEpochSeconds, inviteXWing.publicKey, device.identity, response.kemCiphertext, response.deviceIdentityS, namespace,
@@ -273,7 +273,7 @@ class AsyncInviter private constructor(
         } finally {
             macKey.fill(0)
         }
-        val wrappedMasterKey = Cascade.seal(provider, claim.asyncKey, masterKey, aad = claim.joiner.serialise(), namespace = namespace)
+        val wrappedMasterKey = Suite1.aead.seal(provider, claim.asyncKey, masterKey, aad = claim.joiner.serialise(), namespace = namespace)
         val log = MembershipLog.found(provider, device.identity, device.signingKeyPair, namespace = namespace)
             .append(provider, MembershipOp.ADD, claim.joiner, wrappedMasterKey, signer = device.signingKeyPair, namespace = namespace)
 
@@ -397,7 +397,7 @@ class AsyncInviter private constructor(
             }
             val secret = provider.randomBytes(InviteLink.SECRET_SIZE)
             val ridAsync = AsyncRendezvous.id(provider, secret, namespace)
-            val inviteXWing = XWing.generateKeyPair(provider)
+            val inviteXWing = Suite1.kem.generateKeyPair(provider)
             val masterKey = provider.randomBytes(MASTER_KEY_SIZE)
             val bundle = InviteBundle.build(provider, inviteXWing.publicKey, device.identity, expiryEpochSeconds, ridAsync, device.signingKeyPair, namespace)
             val link = InviteLink.create(provider, secret, device.identity)
@@ -502,14 +502,14 @@ class AsyncJoiner(
             throw PairingException("Bundle has expired")
         }
 
-        val encapsulation = XWing.encapsulate(provider, bundle.inviteXWingPublicKey)
+        val encapsulation = Suite1.kem.encapsulate(provider, bundle.inviteXWingPublicKey)
         var dh1: ByteArray? = null
         var asyncKey: ByteArray? = null
         var macKey: ByteArray? = null
         var asyncKeyTransferred = false
         try {
             dh1 = AsyncHandshake.contributoryDh(
-                provider, device.x25519IdentityPrivateKey, XWing.x25519PublicComponent(bundle.inviteXWingPublicKey),
+                provider, device.x25519IdentityPrivateKey, Suite1.kem.x25519PublicComponent(bundle.inviteXWingPublicKey),
             )
             val transcript = AsyncHandshake.transcript(
                 ridAsync, bundle.expiryEpochSeconds, bundle.inviteXWingPublicKey, bundle.deviceIdentityA, encapsulation.ciphertext, device.identity, namespace,
@@ -582,7 +582,7 @@ class AsyncJoiner(
 
         val entry = log.addEntryFor(ownKey) ?: throw PairingException("No ADD entry for this device")
         val wrapped = entry.wrappedKeys ?: throw PairingException("No wrapped keys for this device")
-        return Cascade.open(provider, context.asyncKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
+        return Suite1.aead.open(provider, context.asyncKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
     }
 
     /** The recovered context master key, as a defensive copy. */
