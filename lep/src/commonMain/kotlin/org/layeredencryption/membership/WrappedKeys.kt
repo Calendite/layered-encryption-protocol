@@ -11,7 +11,9 @@ import org.layeredencryption.XWing
 import org.layeredencryption.decodeUtf8Strict
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.identity.DeviceKeys
+import org.layeredencryption.suite.ProtocolSuite
 import org.layeredencryption.suite.Suite1
+import org.layeredencryption.suite.SuiteId
 import org.layeredencryption.toHexString
 
 /**
@@ -172,6 +174,99 @@ object WrappedKeys {
         ikm = sharedSecret,
         salt = null,
         info = namespace.label(ProtocolLabels.MEMBER_KEY_WRAP),
+        length = WRAP_KEY_SIZE,
+    )
+
+    // ── Era-aware paths (Phase 1 crypto agility) ──────────────────────────────────────────────
+    //
+    // A Suite 1 era uses the frozen v1 construction above, byte for byte. A later era — after a
+    // SUITE_UPGRADE — uses the same per-recipient structure with sizes taken from the era's
+    // suite and the wrap key derived under "v2/member-key-wrap" with the binary suite id in the
+    // info, so a copy wrapped for one suite can never silently unwrap under another.
+
+    internal fun wrapForEra(
+        provider: CryptoProvider,
+        suite: ProtocolSuite,
+        recipients: List<DeviceIdentity>,
+        secret: ByteArray,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): ByteArray {
+        if (suite.id == SuiteId.LEP_HYBRID_2026) return wrapFor(provider, recipients, secret, namespace)
+        require(secret.size == CONTEXT_KEY_BYTES) { "WrappedKeys wraps the $CONTEXT_KEY_BYTES-byte context key" }
+        val ids = recipients.map { it.signingPublicKey.toHexString() }
+        require(ids.toSet().size == ids.size) { "Duplicate recipient in wrap list" }
+        val writer = FrameWriter()
+        for (recipient in recipients) {
+            val encapsulation = suite.kem.encapsulate(provider, recipient.xWingPublicKey)
+            val wrapKey = suitedWrapKey(provider, suite, encapsulation.sharedSecret, namespace)
+            writer.putBytes(recipient.signingPublicKey.toHexString().encodeToByteArray())
+            writer.putBytes(encapsulation.ciphertext)
+            writer.putBytes(suite.aead.seal(provider, wrapKey, secret, aad = recipient.serialise(), namespace = namespace))
+        }
+        return writer.toByteArray()
+    }
+
+    internal fun unwrapForEra(
+        provider: CryptoProvider,
+        suite: ProtocolSuite,
+        blob: ByteArray,
+        device: DeviceKeys,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    ): ByteArray? {
+        if (suite.id == SuiteId.LEP_HYBRID_2026) return unwrapFor(provider, blob, device, namespace)
+        return runCatching {
+            val copies = parseForSuite(suite, blob)
+            val own = device.identity.signingPublicKey.toHexString()
+            val mine = copies.firstOrNull { it.memberId == own } ?: return@runCatching null
+            val sharedSecret = suite.kem.decapsulate(provider, device.xWingPrivateKey, mine.kemCiphertext)
+            val wrapKey = suitedWrapKey(provider, suite, sharedSecret, namespace)
+            suite.aead.open(provider, wrapKey, mine.sealed, aad = device.identity.serialise(), namespace = namespace)
+        }.getOrNull()
+    }
+
+    /** Like [recipientsOrNull], parameterised by the era's suite; null on anything malformed. */
+    internal fun recipientsOrNullForEra(suite: ProtocolSuite, blob: ByteArray): List<String>? {
+        if (suite.id == SuiteId.LEP_HYBRID_2026) return recipientsOrNull(blob)
+        return runCatching { parseForSuite(suite, blob).map { it.memberId } }.getOrNull()
+    }
+
+    /** The suited parse: identical rules to [parse], sizes from the era's suite. */
+    private fun parseForSuite(suite: ProtocolSuite, blob: ByteArray): List<Copy> {
+        require(blob.size <= ProtocolLimits.MAX_WRAPPED_KEYS_BYTES) {
+            "Wrapped-keys blob of ${blob.size} bytes exceeds the ${ProtocolLimits.MAX_WRAPPED_KEYS_BYTES}-byte limit"
+        }
+        val memberIdHexLength = suite.signature.publicKeySize * 2
+        val ciphertextSize = suite.kem.ciphertextSize
+        val sealedBytes = suite.aead.sealedSize(CONTEXT_KEY_BYTES)
+        val copyBytes = LENGTH_PREFIX + memberIdHexLength + LENGTH_PREFIX + ciphertextSize + LENGTH_PREFIX + sealedBytes
+        val maxRecipients = ProtocolLimits.MAX_WRAPPED_KEYS_BYTES / copyBytes
+        val reader = FrameReader(blob)
+        val copies = mutableListOf<Copy>()
+        val seen = mutableSetOf<String>()
+        while (reader.hasRemaining()) {
+            require(copies.size < maxRecipients) { "More than $maxRecipients wrapped copies" }
+            val memberId = reader.readBytes(memberIdHexLength).decodeUtf8Strict()
+            require(memberId.length == memberIdHexLength) { "Member id must be $memberIdHexLength characters" }
+            require(memberId.all { it in '0'..'9' || it in 'a'..'f' }) { "Member id must be lowercase hex" }
+            require(seen.add(memberId)) { "Duplicate wrapped-copy recipient" }
+            val kemCiphertext = reader.readBytes(ciphertextSize)
+            require(kemCiphertext.size == ciphertextSize) { "Wrapped-copy KEM ciphertext has wrong size" }
+            val sealed = reader.readBytes(sealedBytes)
+            require(sealed.size == sealedBytes) { "Sealed copy must be exactly $sealedBytes bytes" }
+            copies += Copy(memberId, kemCiphertext, sealed)
+        }
+        return copies
+    }
+
+    private fun suitedWrapKey(
+        provider: CryptoProvider,
+        suite: ProtocolSuite,
+        sharedSecret: ByteArray,
+        namespace: ProtocolNamespace,
+    ): ByteArray = provider.hkdfSha256(
+        ikm = sharedSecret,
+        salt = null,
+        info = namespace.label(ProtocolLabels.MEMBER_KEY_WRAP_SUITED) + suite.id.toWireBytes(),
         length = WRAP_KEY_SIZE,
     )
 }

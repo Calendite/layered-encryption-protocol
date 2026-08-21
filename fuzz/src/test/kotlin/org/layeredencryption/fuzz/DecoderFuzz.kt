@@ -8,6 +8,7 @@ import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.invite.InviteBundle
 import org.layeredencryption.invite.InviteLink
 import org.layeredencryption.membership.MembershipLog
+import org.layeredencryption.membership.SuiteUpgradePayload
 import org.layeredencryption.membership.WrappedKeys
 import org.layeredencryption.pairing.PairingCode
 import org.layeredencryption.pairing.PairingException
@@ -64,6 +65,12 @@ class DecoderFuzz {
     @FuzzTest(maxDuration = "30s")
     fun wrappedKeysRecipients(data: ByteArray) {
         WrappedKeys.recipientsOf(data)
+    }
+
+    /** Contract: null on anything malformed, never a throw. */
+    @FuzzTest(maxDuration = "30s")
+    fun suiteUpgradePayload(data: ByteArray) {
+        SuiteUpgradePayload.parse(data)
     }
 
     /** Contract: [PairingException] is the only exception the wire boundary lets out. */

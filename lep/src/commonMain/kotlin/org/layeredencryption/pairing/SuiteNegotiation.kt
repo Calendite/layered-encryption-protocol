@@ -252,6 +252,3 @@ class SuiteAccept(
     }
 }
 
-/** The wire form of a [SuiteId]: 2 bytes, big-endian — the same bytes everywhere it appears. */
-internal fun SuiteId.toWireBytes(): ByteArray =
-    byteArrayOf((value.toInt() ushr 8).toByte(), value.toByte())

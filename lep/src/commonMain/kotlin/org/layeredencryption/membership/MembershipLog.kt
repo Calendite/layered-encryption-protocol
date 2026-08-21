@@ -12,7 +12,11 @@ import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.identity.DeviceKeys
+import org.layeredencryption.suite.ProtocolSuite
 import org.layeredencryption.suite.Suite1
+import org.layeredencryption.suite.SuiteId
+import org.layeredencryption.suite.SuiteRegistry
+import org.layeredencryption.suite.SuiteResolver
 import org.layeredencryption.toHexString
 
 /** Membership operations (docs/Protocol.md §4.7). */
@@ -28,6 +32,17 @@ enum class MembershipOp(val code: Int) {
      * was never a member of the winning branch. Also serves as a standalone rekey primitive.
      */
     ROTATE(3),
+
+    /**
+     * An atomic cryptographic-suite transition (the migration brief §5): the entry's subject is
+     * the signer, and its payload ([SuiteUpgradePayload]) binds the old and new suite ids, the
+     * exact transition epoch, and a fresh context key wrapped for every retained member under
+     * the **new** suite — the suite change and the rotation are one signed entry, so no valid
+     * log prefix can show one without the other. Entries after it verify under the new suite;
+     * an application that does not know the new suite fails closed on the whole log (by design:
+     * a device must update before its context upgrades). Transitions are monotonic in suite id.
+     */
+    SUITE_UPGRADE(4),
     ;
 
     companion object {
@@ -239,7 +254,12 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
     fun head(provider: CryptoProvider, namespace: ProtocolNamespace = ProtocolNamespace.Default): ByteArray =
         entriesSnapshot.last().hash(provider, namespace)
 
-    /** Appends a signed [op] over [deviceIdentity], chained to the current head and signed by [signer]. */
+    /**
+     * Appends a signed [op] over [deviceIdentity], chained to the current head and signed by
+     * [signer] — under the suite of the log's current era: entries after a [MembershipOp.SUITE_UPGRADE]
+     * are signed (and verified) under the upgraded suite. For a Suite-1-only log this is the
+     * frozen legacy path, byte for byte.
+     */
     fun append(
         provider: CryptoProvider,
         op: MembershipOp,
@@ -247,8 +267,12 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         wrappedKeys: ByteArray?,
         signer: KeyPair,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
     ): MembershipLog = MembershipLog(
-        entriesSnapshot + signEntry(provider, head(provider, namespace), op, deviceIdentity, wrappedKeys, signer, namespace),
+        entriesSnapshot + signEntry(
+            provider, head(provider, namespace), op, deviceIdentity, wrappedKeys, signer, namespace,
+            suite = currentEraSuite(resolver),
+        ),
     )
 
     /**
@@ -265,7 +289,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             when (entry.op) {
                 MembershipOp.ADD -> active[key] = entry.deviceIdentity
                 MembershipOp.REVOKE -> active.remove(key)
-                MembershipOp.ROTATE -> Unit
+                MembershipOp.ROTATE, MembershipOp.SUITE_UPGRADE -> Unit
             }
         }
         return active.values.toList()
@@ -289,6 +313,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         newMasterKey: ByteArray,
         signer: KeyPair,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
     ): MembershipLog {
         val removedKey = removed.signingPublicKey.toHexString()
         val remaining = activeIdentities(provider).filterNot {
@@ -302,9 +327,10 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             provider = provider,
             op = MembershipOp.REVOKE,
             deviceIdentity = removed,
-            wrappedKeys = WrappedKeys.wrapFor(provider, remaining, newMasterKey, namespace),
+            wrappedKeys = WrappedKeys.wrapForEra(provider, currentEraSuite(resolver), remaining, newMasterKey, namespace),
             signer = signer,
             namespace = namespace,
+            resolver = resolver,
         )
     }
 
@@ -322,14 +348,62 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         newMasterKey: ByteArray,
         signer: DeviceKeys,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
     ): MembershipLog = append(
         provider = provider,
         op = MembershipOp.ROTATE,
         deviceIdentity = signer.identity,
-        wrappedKeys = WrappedKeys.wrapFor(provider, activeIdentities(provider), newMasterKey, namespace),
+        wrappedKeys = WrappedKeys.wrapForEra(provider, currentEraSuite(resolver), activeIdentities(provider), newMasterKey, namespace),
         signer = signer.signingKeyPair,
         namespace = namespace,
+        resolver = resolver,
     )
+
+    /**
+     * Appends the atomic suite transition (the migration brief §5): one [MembershipOp.SUITE_UPGRADE]
+     * entry that rotates the context key to [newMasterKey] — wrapped for every active member
+     * under [newSuite] — and moves the log's era forward. The entry itself is signed under the
+     * *old* suite: the upgrade is authorised by the regime being left; everything after it is
+     * signed and verified under [newSuite].
+     *
+     * Policy note (deliberately not enforceable here): every device that will remain active
+     * should already run software that knows [newSuite], because a device that does not fails
+     * closed on the whole log afterwards. Revoke the stragglers first — a keyless revocation
+     * batch may terminate in this entry, making "remove the non-upgraded, then upgrade" one
+     * atomic epoch.
+     */
+    fun upgradeSuite(
+        provider: CryptoProvider,
+        newSuite: ProtocolSuite,
+        newMasterKey: ByteArray,
+        signer: DeviceKeys,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
+    ): MembershipLog {
+        val current = currentEraSuite(resolver)
+        require(resolver.contains(newSuite.id)) { "The target suite ${newSuite.id} is not registered" }
+        require(newSuite.id.value > current.id.value) {
+            "Suite transitions are monotonic: ${newSuite.id} does not follow ${current.id}"
+        }
+        require(newMasterKey.size == WrappedKeys.CONTEXT_KEY_BYTES) {
+            "The context key is ${WrappedKeys.CONTEXT_KEY_BYTES} bytes"
+        }
+        val payload = SuiteUpgradePayload(
+            oldSuite = current.id,
+            newSuite = newSuite.id,
+            transitionEpoch = epochCount() + 1,
+            wrappedKeys = WrappedKeys.wrapForEra(provider, newSuite, activeIdentities(provider), newMasterKey, namespace),
+        )
+        return append(
+            provider = provider,
+            op = MembershipOp.SUITE_UPGRADE,
+            deviceIdentity = signer.identity,
+            wrappedKeys = payload.serialise(),
+            signer = signer.signingKeyPair,
+            namespace = namespace,
+            resolver = resolver,
+        )
+    }
 
     /**
      * Every rotated context key this log hands [device], oldest first.
@@ -343,11 +417,31 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         provider: CryptoProvider,
         device: DeviceKeys,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
-    ): List<ByteArray> = entries
-        .filter { it.op == MembershipOp.REVOKE || it.op == MembershipOp.ROTATE }
-        .mapNotNull { entry ->
-            entry.wrappedKeys?.let { WrappedKeys.unwrapFor(provider, it, device, namespace) }
+        resolver: SuiteResolver = SuiteRegistry,
+    ): List<ByteArray> {
+        val keys = mutableListOf<ByteArray>()
+        var era = resolver.require(SuiteId.LEP_HYBRID_2026)
+        for (entry in entriesSnapshot) {
+            when (entry.op) {
+                MembershipOp.REVOKE, MembershipOp.ROTATE ->
+                    entry.wrappedKeys
+                        ?.let { WrappedKeys.unwrapForEra(provider, era, it, device, namespace) }
+                        ?.let { keys += it }
+                MembershipOp.SUITE_UPGRADE -> {
+                    // On a verified log this always parses and resolves; anything else
+                    // contributes nothing, consistent with reconciling by count.
+                    val payload = entry.wrappedKeys?.let { SuiteUpgradePayload.parse(it) } ?: continue
+                    if (!resolver.contains(payload.newSuite)) continue
+                    val newEra = resolver.require(payload.newSuite)
+                    WrappedKeys.unwrapForEra(provider, newEra, payload.wrappedKeys, device, namespace)
+                        ?.let { keys += it }
+                    era = newEra
+                }
+                MembershipOp.ADD -> Unit
+            }
         }
+        return keys
+    }
 
     /**
      * The founding entry's hash, or null for an empty log.
@@ -372,9 +466,14 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
      * [Reconciliation.InvalidBranch] and is never adopted. This log is assumed already verified by
      * its holder; it is re-verified here so the API cannot be misused with an unchecked receiver.
      */
-    fun reconcile(provider: CryptoProvider, other: MembershipLog, namespace: ProtocolNamespace = ProtocolNamespace.Default): Reconciliation {
-        if (verify(provider, namespace) !is MembershipVerification.Valid) return Reconciliation.InvalidBranch
-        if (other.verify(provider, namespace) !is MembershipVerification.Valid) return Reconciliation.InvalidBranch
+    fun reconcile(
+        provider: CryptoProvider,
+        other: MembershipLog,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
+    ): Reconciliation {
+        if (verify(provider, namespace, resolver) !is MembershipVerification.Valid) return Reconciliation.InvalidBranch
+        if (other.verify(provider, namespace, resolver) !is MembershipVerification.Valid) return Reconciliation.InvalidBranch
 
         val shared = commonPrefixLength(other)
         val oursAfter = entriesSnapshot.size - shared
@@ -427,8 +526,9 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         other: MembershipLog,
         resolver: DeviceKeys,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        suites: SuiteResolver = SuiteRegistry,
     ): ForkResolution {
-        val outcome = reconcile(provider, other, namespace)
+        val outcome = reconcile(provider, other, namespace, suites)
         if (outcome !is Reconciliation.Forked) return ForkResolution.NotForked(outcome)
 
         Diagnostics.debug(LepTag.MEMBERSHIP) {
@@ -448,7 +548,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             }
         }
 
-        val winnerActive = (winner.verify(provider, namespace) as MembershipVerification.Valid).activeMembers
+        val winnerActive = (winner.verify(provider, namespace, suites) as MembershipVerification.Valid).activeMembers
         val resolverHex = resolver.identity.signingPublicKey.toHexString()
         if (resolverHex in condemned || resolverHex !in winnerActive) {
             Diagnostics.warning(LepTag.MEMBERSHIP) { "fork resolution: this device is condemned or absent from the winner — no authority, re-pairing required" }
@@ -476,6 +576,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
                 wrappedKeys = null,
                 signer = resolver.signingKeyPair,
                 namespace = namespace,
+                resolver = suites,
             )
         }
 
@@ -496,7 +597,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         var newMasterKey: ByteArray? = null
         if (toRevoke.isNotEmpty() || droppedKeyHolders) {
             newMasterKey = provider.randomBytes(WrappedKeys.CONTEXT_KEY_BYTES)
-            resolved = resolved.rotate(provider, newMasterKey, resolver, namespace)
+            resolved = resolved.rotate(provider, newMasterKey, resolver, namespace, suites)
         }
         Diagnostics.debug(LepTag.MEMBERSHIP) {
             "fork resolved: ${toRevoke.size} revoked, ${lostAdditions.size} addition(s) lost, " +
@@ -600,7 +701,11 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
      * keyless revocation — ejection with no cryptographic exclusion — impossible to present as a
      * valid state at all.
      */
-    fun verify(provider: CryptoProvider, namespace: ProtocolNamespace = ProtocolNamespace.Default): MembershipVerification {
+    fun verify(
+        provider: CryptoProvider,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
+    ): MembershipVerification {
         // An empty log has no genesis and therefore no founder; every other method here assumes
         // entry zero exists. Calling it valid-with-no-members would let a wiped log verify.
         if (entriesSnapshot.isEmpty()) return MembershipVerification.Invalid("Empty log has no genesis entry", 0)
@@ -608,27 +713,52 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         val members = mutableSetOf<String>()
         var expectedPrevious = MembershipEntry.GENESIS_PREVIOUS_HASH
         var inKeylessBatch = false
+        // Every context is founded under Suite 1 (a genesis suite declaration belongs to the
+        // versioned entry format of a later phase); SUITE_UPGRADE entries move the era forward,
+        // and each historical entry verifies under the suite that was active when it was made.
+        var activeSuite = resolver.require(SuiteId.LEP_HYBRID_2026)
+        var epoch = 0
 
         entriesSnapshot.forEachIndexed { index, entry ->
             if (!entry.previousHash.contentEquals(expectedPrevious)) {
                 return MembershipVerification.Invalid("Broken hash chain", index)
             }
+            // Identity bindings are artifacts of identity *creation*, and every current-format
+            // identity is a Suite 1 artifact — bindings stay under Suite 1 until versioned
+            // identities and KeyTransitions exist. Entry signatures are live per-era operations
+            // and route through the active suite.
             if (!entry.deviceIdentity.verifyBinding(provider, namespace)) {
                 return MembershipVerification.Invalid("Invalid device-identity binding", index)
             }
-            if (!Suite1.signature.verify(provider, entry.signerPublicKey, entry.unsignedBytes(namespace), entry.signature)) {
+            if (!activeSuite.signature.verify(provider, entry.signerPublicKey, entry.unsignedBytes(namespace), entry.signature)) {
                 return MembershipVerification.Invalid("Invalid signature", index)
             }
-            if (inKeylessBatch && !(entry.op == MembershipOp.REVOKE && !entry.hasWrappedKeys) && entry.op != MembershipOp.ROTATE) {
+            if (inKeylessBatch &&
+                !(entry.op == MembershipOp.REVOKE && !entry.hasWrappedKeys) &&
+                entry.op != MembershipOp.ROTATE &&
+                entry.op != MembershipOp.SUITE_UPGRADE
+            ) {
                 return MembershipVerification.Invalid("A keyless revocation batch must terminate in its rotation", index)
             }
-            val authorisationFailure = checkAuthorisation(index, entry, members)
+            val authorisationFailure = checkAuthorisation(index, entry, members, activeSuite)
             if (authorisationFailure != null) {
                 Diagnostics.debug(LepTag.MEMBERSHIP) { "log invalid at entry $index: $authorisationFailure" }
                 return MembershipVerification.Invalid(authorisationFailure, index)
             }
+            var nextSuite: ProtocolSuite? = null
+            if (entry.op == MembershipOp.SUITE_UPGRADE) {
+                val upgrade = checkSuiteUpgrade(entry, members, activeSuite, epoch, resolver)
+                val failure = upgrade.failure
+                if (failure != null) {
+                    Diagnostics.debug(LepTag.MEMBERSHIP) { "log invalid at entry $index: $failure" }
+                    return MembershipVerification.Invalid(failure, index)
+                }
+                nextSuite = upgrade.newSuite
+            }
 
             applyOp(entry, members)
+            if (advancesEpoch(entry)) epoch += 1
+            nextSuite?.let { activeSuite = it }
             inKeylessBatch = entry.op == MembershipOp.REVOKE && !entry.hasWrappedKeys
             expectedPrevious = entry.hash(provider, namespace)
         }
@@ -652,7 +782,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         return writer.toByteArray()
     }
 
-    private fun checkAuthorisation(index: Int, entry: MembershipEntry, members: Set<String>): String? {
+    private fun checkAuthorisation(index: Int, entry: MembershipEntry, members: Set<String>, activeSuite: ProtocolSuite): String? {
         if (index == 0) {
             if (entry.op != MembershipOp.ADD) return "Genesis entry must be ADD"
             if (!entry.signerPublicKey.contentEquals(entry.deviceIdentity.signingPublicKey)) {
@@ -677,7 +807,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             MembershipOp.REVOKE -> {
                 if (subject !in members) return "Revoking a non-member"
                 if (entry.hasWrappedKeys) {
-                    checkRecipients(entry, members - subject, "Revocation")?.let { return it }
+                    checkRecipients(entry, members - subject, "Revocation", activeSuite)?.let { return it }
                 }
             }
             // A rotation names its own signer as subject — there is no third party to speak
@@ -686,21 +816,64 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             MembershipOp.ROTATE -> {
                 if (subject != entry.signerPublicKey.toHexString()) return "Rotation subject must be its signer"
                 if (!entry.hasWrappedKeys) return "Rotation must carry wrapped keys"
-                checkRecipients(entry, members, "Rotation")?.let { return it }
+                checkRecipients(entry, members, "Rotation", activeSuite)?.let { return it }
+            }
+            // Like ROTATE, an upgrade speaks only for its signer; the payload rules — old/new
+            // suite, transition epoch, fresh keys for exactly the retained members — live in
+            // [checkSuiteUpgrade], which needs the walk's suite and epoch state.
+            MembershipOp.SUITE_UPGRADE -> {
+                if (subject != entry.signerPublicKey.toHexString()) return "Suite upgrade subject must be its signer"
             }
         }
         return null
     }
 
+    private class UpgradeCheck(val newSuite: ProtocolSuite?, val failure: String?)
+
+    /**
+     * The complete [MembershipOp.SUITE_UPGRADE] payload rule set (the migration brief §5): the
+     * payload parses under its version gate; it names the era it is leaving; the target suite is
+     * known here (a verifier that does not know it fails the whole log — update before the
+     * context upgrades); transitions are strictly monotonic in id — a downgrade is never an
+     * ordinary operation; the claimed transition epoch matches the chain walk; and the fresh
+     * key is wrapped, under the new suite, for exactly the members retained at this point — so
+     * no valid prefix can show the suite changed while omitting anyone's key.
+     */
+    private fun checkSuiteUpgrade(
+        entry: MembershipEntry,
+        members: Set<String>,
+        activeSuite: ProtocolSuite,
+        epochsSoFar: Int,
+        resolver: SuiteResolver,
+    ): UpgradeCheck {
+        fun fail(reason: String) = UpgradeCheck(null, reason)
+        val wrapped = entry.wrappedKeys ?: return fail("Suite upgrade is missing its payload")
+        val payload = SuiteUpgradePayload.parse(wrapped) ?: return fail("Suite upgrade carries a malformed payload")
+        if (payload.oldSuite != activeSuite.id) return fail("Suite upgrade names the wrong current suite")
+        if (!resolver.contains(payload.newSuite)) return fail("Suite upgrade targets an unknown suite")
+        if (payload.newSuite.value <= payload.oldSuite.value) {
+            return fail("Suite transitions are monotonic — downgrade or same-suite upgrade rejected")
+        }
+        if (payload.transitionEpoch != epochsSoFar + 1) return fail("Suite upgrade transition epoch does not match the chain")
+        val newSuite = resolver.require(payload.newSuite)
+        val recipients = WrappedKeys.recipientsOrNullForEra(newSuite, payload.wrappedKeys)
+            ?: return fail("Suite upgrade carries malformed wrapped keys")
+        if (recipients.size != recipients.toSet().size) return fail("Suite upgrade wraps a duplicate recipient")
+        if (recipients.toSet() != members) {
+            return fail("Suite upgrade must wrap the key for exactly the active members")
+        }
+        return UpgradeCheck(newSuite, null)
+    }
+
     /**
      * The wrapped-key recipient rule for rotation-carrying entries: exactly the [expected] member
-     * set, no omissions, no extras, no duplicates, and the blob must parse. `ADD` entries are
-     * deliberately outside this rule — their payload is a Cascade blob for the added device (the
-     * async approval path), not a [WrappedKeys] bundle.
+     * set, no omissions, no extras, no duplicates, and the blob must parse — with the era's
+     * suite sizes. `ADD` entries are deliberately outside this rule — their payload is a Cascade
+     * blob for the added device (the async approval path), not a [WrappedKeys] bundle.
      */
-    private fun checkRecipients(entry: MembershipEntry, expected: Set<String>, what: String): String? {
+    private fun checkRecipients(entry: MembershipEntry, expected: Set<String>, what: String, suite: ProtocolSuite): String? {
         val wrapped = entry.wrappedKeys ?: return "$what is missing its wrapped keys"
-        val recipients = WrappedKeys.recipientsOrNull(wrapped) ?: return "$what carries malformed wrapped keys"
+        val recipients = WrappedKeys.recipientsOrNullForEra(suite, wrapped) ?: return "$what carries malformed wrapped keys"
         if (recipients.size != recipients.toSet().size) return "$what wraps a duplicate recipient"
         if (recipients.toSet() != expected) {
             return "$what must wrap the key for exactly the active members it leaves behind"
@@ -713,8 +886,57 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         when (entry.op) {
             MembershipOp.ADD -> members.add(deviceKey)
             MembershipOp.REVOKE -> members.remove(deviceKey)
-            MembershipOp.ROTATE -> Unit
+            MembershipOp.ROTATE, MembershipOp.SUITE_UPGRADE -> Unit
         }
+    }
+
+    /** Keyed revocations, rotations, and suite upgrades each advance the context one epoch. */
+    private fun advancesEpoch(entry: MembershipEntry): Boolean = when (entry.op) {
+        MembershipOp.ADD -> false
+        MembershipOp.REVOKE -> entry.hasWrappedKeys
+        MembershipOp.ROTATE, MembershipOp.SUITE_UPGRADE -> true
+    }
+
+    private fun epochCount(): Int = entriesSnapshot.count { advancesEpoch(it) }
+
+    /**
+     * The suite of the log's current era: Suite 1 until a SUITE_UPGRADE, then that entry's
+     * target. Builder-side only — verification tracks the era through its own validated walk.
+     * Throws on a corrupt upgrade entry or an unknown target: builders must not guess.
+     */
+    private fun currentEraSuite(resolver: SuiteResolver): ProtocolSuite {
+        var suite = resolver.require(SuiteId.LEP_HYBRID_2026)
+        for (entry in entriesSnapshot) {
+            if (entry.op != MembershipOp.SUITE_UPGRADE) continue
+            val payload = entry.wrappedKeys?.let { SuiteUpgradePayload.parse(it) }
+                ?: throw IllegalArgumentException("Corrupt suite-upgrade entry")
+            suite = resolver.require(payload.newSuite)
+        }
+        return suite
+    }
+
+    /**
+     * The context's `startEpoch → suiteId` schedule (the migration brief §6), derived from the
+     * verified log — a suite transition is a membership event and an epoch boundary, never a
+     * device-local setting. Null when the log does not verify: an unverified schedule would be
+     * an attacker-chosen one.
+     */
+    fun suiteSchedule(
+        provider: CryptoProvider,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
+    ): SuiteSchedule? {
+        if (verify(provider, namespace, resolver) !is MembershipVerification.Valid) return null
+        val eras = mutableListOf(SuiteSchedule.Era(0, SuiteId.LEP_HYBRID_2026))
+        var epoch = 0
+        for (entry in entriesSnapshot) {
+            if (entry.op == MembershipOp.SUITE_UPGRADE) {
+                val payload = entry.wrappedKeys?.let { SuiteUpgradePayload.parse(it) } ?: return null
+                eras += SuiteSchedule.Era(epoch + 1, payload.newSuite)
+            }
+            if (advancesEpoch(entry)) epoch += 1
+        }
+        return SuiteSchedule(eras)
     }
 
     companion object {
@@ -756,6 +978,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             wrappedKeys: ByteArray?,
             signer: KeyPair,
             namespace: ProtocolNamespace = ProtocolNamespace.Default,
+            suite: ProtocolSuite = Suite1,
         ): MembershipEntry {
             val unsigned = MembershipEntry(previousHash, op, deviceIdentity, wrappedKeys, signer.publicKey, ByteArray(0)).unsignedBytes(namespace)
             return MembershipEntry(
@@ -764,7 +987,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
                 deviceIdentity = deviceIdentity,
                 wrappedKeys = wrappedKeys,
                 signerPublicKey = signer.publicKey,
-                signature = Suite1.signature.sign(provider, signer.privateKey, unsigned),
+                signature = suite.signature.sign(provider, signer.privateKey, unsigned),
             )
         }
     }

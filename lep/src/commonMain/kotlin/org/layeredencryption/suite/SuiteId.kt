@@ -18,6 +18,9 @@ import kotlin.jvm.JvmInline
 value class SuiteId(val value: UShort) {
     override fun toString(): String = "SuiteId(${value})"
 
+    /** The wire form: 2 bytes, big-endian — the same bytes everywhere a suite id appears. */
+    fun toWireBytes(): ByteArray = byteArrayOf((value.toInt() ushr 8).toByte(), value.toByte())
+
     companion object {
         /**
          * Suite 1: exactly the construction shipped today, frozen — see [Suite1] for the full
