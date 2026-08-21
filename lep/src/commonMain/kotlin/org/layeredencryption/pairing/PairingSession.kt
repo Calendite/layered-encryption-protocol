@@ -137,8 +137,16 @@ class Inviter(
     private val existing: ExistingCalendar? = null,
     /** Domain-separates every derivation in the ceremony (LEP-10); both sides must agree. */
     private val namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    /**
+     * Present only in the negotiated flow ([PairingFerry.runNegotiatedInviter]): routes every
+     * crypto operation through the selected suite and switches the transcript to the v2
+     * construction that authenticates the negotiation. Null is the explicit legacy Suite 1
+     * flow, byte for byte.
+     */
+    private val negotiated: NegotiatedSuiteContext? = null,
 ) {
-    private val xWingKeyPair = Suite1.kem.generateKeyPair(provider)
+    private val suite = negotiated?.suite ?: Suite1
+    private val xWingKeyPair = suite.kem.generateKeyPair(provider)
     private var stage = InviterStage.AWAITING_HELLO
 
     /**
@@ -205,7 +213,7 @@ class Inviter(
         // Scrubbed on every exit (RT-05): a MAC mismatch throw must not leave the shared secret,
         // the code secret, or a rejected handshake key waiting for the garbage collector. The
         // handshake key alone survives, by transferring into the session field.
-        val sharedSecret = Suite1.kem.decapsulate(provider, xWingKeyPair.privateKey, response.kemCiphertext)
+        val sharedSecret = suite.kem.decapsulate(provider, xWingKeyPair.privateKey, response.kemCiphertext)
         var handshakeKey: ByteArray? = null
         var codeSecret: ByteArray? = null
         var handshakeKeyTransferred = false
@@ -217,6 +225,7 @@ class Inviter(
                 joinerDeviceIdentity = response.joinerDeviceIdentity.serialise(),
                 sasCommitment = Handshake.sasCommitment(provider, sasNonce, namespace),
                 namespace = namespace,
+                negotiated = negotiated,
             )
             handshakeKey = Handshake.handshakeKey(provider, sharedSecret, transcript)
             codeSecret = Handshake.codeSecret(provider, code.canonical, namespace)
@@ -266,7 +275,7 @@ class Inviter(
         if (confirmation.session !== this) throw PairingException("SAS confirmation belongs to a different session")
         val joiner = joinerDeviceIdentity ?: throw PairingException("complete() called before a joiner response")
         val handshakeKey = handshakeKey ?: throw PairingException("complete() called before the handshake")
-        val wrappedMasterKey = Suite1.aead.seal(provider, handshakeKey, keys.serialise(), aad = joiner.serialise(), namespace = namespace)
+        val wrappedMasterKey = suite.aead.seal(provider, handshakeKey, keys.serialise(), aad = joiner.serialise(), namespace = namespace)
         val base = existing?.membershipLog
             ?: MembershipLog.found(provider, device.identity, device.signingKeyPair, namespace = namespace)
         val log = base.append(provider, MembershipOp.ADD, joiner, wrappedMasterKey, signer = device.signingKeyPair, namespace = namespace)
@@ -306,7 +315,10 @@ class Joiner(
     private val code: PairingCode,
     /** Domain-separates every derivation in the ceremony (LEP-10); both sides must agree. */
     private val namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    /** See [Inviter]'s `negotiated`: null is the explicit legacy Suite 1 flow, byte for byte. */
+    private val negotiated: NegotiatedSuiteContext? = null,
 ) {
+    private val suite = negotiated?.suite ?: Suite1
     private var stage = JoinerStage.AWAITING_HELLO
     private var handshakeKey: ByteArray? = null
     private var expectedInviterMac: ByteArray? = null
@@ -360,7 +372,7 @@ class Joiner(
         if (!hello.inviterDeviceIdentity.verifyBinding(provider, namespace)) {
             throw PairingException("Inviter device-identity binding is invalid")
         }
-        val encapsulation = Suite1.kem.encapsulate(provider, hello.xWingPublicKey)
+        val encapsulation = suite.kem.encapsulate(provider, hello.xWingPublicKey)
         var handshakeKey: ByteArray? = null
         var codeSecret: ByteArray? = null
         var transferred = false
@@ -372,6 +384,7 @@ class Joiner(
                 joinerDeviceIdentity = device.identity.serialise(),
                 sasCommitment = hello.sasCommitment,
                 namespace = namespace,
+                negotiated = negotiated,
             )
             handshakeKey = Handshake.handshakeKey(provider, encapsulation.sharedSecret, transcript)
             codeSecret = Handshake.codeSecret(provider, code.canonical, namespace)
@@ -454,7 +467,7 @@ class Joiner(
 
         val entry = log.addEntryFor(ownKey) ?: throw PairingException("No ADD entry for this device")
         val wrapped = entry.wrappedKeys ?: throw PairingException("No wrapped keys for this device")
-        val unwrapped = Suite1.aead.open(provider, handshakeKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
+        val unwrapped = suite.aead.open(provider, handshakeKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
         recoveredKeys = EpochKeys.deserialise(unwrapped)
             ?: throw PairingException("The wrapped keys did not decode")
         membershipLog = log

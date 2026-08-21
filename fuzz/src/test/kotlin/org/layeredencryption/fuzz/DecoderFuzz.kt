@@ -75,6 +75,8 @@ class DecoderFuzz {
             PairingWire::decodeInviterConfirm,
             PairingWire::decodeInviterComplete,
             { PairingWire.decodeSasConfirmed(it) },
+            PairingWire::decodeSuiteOffer,
+            PairingWire::decodeSuiteAccept,
         )) {
             try {
                 decode(data)

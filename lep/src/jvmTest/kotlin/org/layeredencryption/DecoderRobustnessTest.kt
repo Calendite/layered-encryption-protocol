@@ -13,6 +13,9 @@ import org.layeredencryption.pairing.InviterHello
 import org.layeredencryption.pairing.PairingCode
 import org.layeredencryption.pairing.PairingException
 import org.layeredencryption.pairing.PairingWire
+import org.layeredencryption.pairing.SuiteAccept
+import org.layeredencryption.pairing.SuiteOffer
+import org.layeredencryption.suite.SuiteId
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
@@ -103,6 +106,18 @@ class DecoderRobustnessTest {
     @Test
     fun pairingWire_throwsOnlyPairingException() =
         assertOnlyThrows(pairingExceptionOnly, mutations(helloFrame)) { PairingWire.decodeInviterHello(it) }
+
+    @Test
+    fun suiteNegotiationFrames_throwOnlyPairingException() {
+        val offer = PairingWire.encode(
+            SuiteOffer(provider.randomBytes(32), listOf(SuiteId.LEP_HYBRID_2026), SuiteId.LEP_HYBRID_2026),
+        )
+        val accept = PairingWire.encode(
+            SuiteAccept(provider.randomBytes(32), listOf(SuiteId.LEP_HYBRID_2026), SuiteId.LEP_HYBRID_2026, SuiteId.LEP_HYBRID_2026),
+        )
+        assertOnlyThrows(pairingExceptionOnly, mutations(offer)) { PairingWire.decodeSuiteOffer(it) }
+        assertOnlyThrows(pairingExceptionOnly, mutations(accept)) { PairingWire.decodeSuiteAccept(it) }
+    }
 
     @Test
     fun epochKeys_neverThrows() =

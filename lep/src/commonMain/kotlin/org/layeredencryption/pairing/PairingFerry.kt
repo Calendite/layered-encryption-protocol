@@ -1,6 +1,11 @@
 package org.layeredencryption.pairing
 
+import org.layeredencryption.CryptoProvider
 import org.layeredencryption.FrameChannel
+import org.layeredencryption.ProtocolNamespace
+import org.layeredencryption.identity.DeviceKeys
+import org.layeredencryption.suite.SuiteRegistry
+import org.layeredencryption.suite.SuiteResolver
 
 /**
  * Drives the pairing ceremony (docs/Protocol.md §6.3) over a [FrameChannel].
@@ -22,6 +27,13 @@ import org.layeredencryption.FrameChannel
  * Key release is gated on **both** humans: the inviter's own `confirmSas` *and* the joiner's
  * `SasConfirmed` frame must both pass before the wrapped master key is sent. A mismatch on either
  * side closes the channel; the other side surfaces the closure as a failed pairing.
+ *
+ * ### Two flows, never mixed
+ * [runInviter]/[runJoiner] are the explicit legacy Suite 1 flow — its bytes are frozen.
+ * [runNegotiatedInviter]/[runNegotiatedJoiner] prefix one suite-negotiation round trip
+ * ([SuiteNegotiator]) and then run the same ceremony suite-routed with the v2 transcript. A
+ * failed negotiation throws and closes the channel; nothing here ever retries the other flow —
+ * silent fallback is exactly what the negotiation exists to prevent.
  */
 object PairingFerry {
 
@@ -30,6 +42,75 @@ object PairingFerry {
      * ceremony completes. [confirmSas] shows the 6-digit SAS to this device's human.
      */
     suspend fun runInviter(
+        channel: FrameChannel,
+        inviter: Inviter,
+        confirmSas: suspend (String) -> Boolean,
+    ): ByteArray = ferryInviter(channel, inviter, confirmSas)
+
+    /**
+     * Runs the joining side over a connected [channel]. Returns the recovered context master key.
+     */
+    suspend fun runJoiner(
+        channel: FrameChannel,
+        joiner: Joiner,
+        confirmSas: suspend (String) -> Boolean,
+    ): ByteArray = ferryJoiner(channel, joiner, confirmSas)
+
+    /**
+     * The negotiated inviting side: sends the suite offer, validates the accept, then runs the
+     * ceremony under the selected suite. Throws [PairingException] (channel closed) on any
+     * negotiation failure — a legacy session is never constructed as a fallback.
+     */
+    suspend fun runNegotiatedInviter(
+        channel: FrameChannel,
+        provider: CryptoProvider,
+        device: DeviceKeys,
+        code: PairingCode,
+        existing: ExistingCalendar? = null,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
+        policy: PairingSuitePolicy = PairingSuitePolicy(),
+        confirmSas: suspend (String) -> Boolean,
+    ): ByteArray {
+        val context = try {
+            val negotiation = SuiteNegotiator.beginInviter(provider, resolver, policy)
+            channel.send(negotiation.offerFrame)
+            negotiation.onAccept(channel.receive())
+        } catch (e: Throwable) {
+            channel.close()
+            throw e
+        }
+        return ferryInviter(channel, Inviter(provider, device, code, existing, namespace, context), confirmSas)
+    }
+
+    /**
+     * The negotiated joining side: expects the suite offer as the first frame (a legacy hello is
+     * rejected — the negotiated flow never auto-detects legacy), answers with its accept, then
+     * runs the ceremony under the selected suite.
+     */
+    suspend fun runNegotiatedJoiner(
+        channel: FrameChannel,
+        provider: CryptoProvider,
+        device: DeviceKeys,
+        code: PairingCode,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
+        policy: PairingSuitePolicy = PairingSuitePolicy(),
+        confirmSas: suspend (String) -> Boolean,
+    ): ByteArray {
+        val context = try {
+            val negotiation = SuiteNegotiator.respond(channel.receive(), provider, resolver, policy)
+            channel.send(negotiation.acceptFrame)
+            negotiation.context
+        } catch (e: Throwable) {
+            channel.close()
+            throw e
+        }
+        return ferryJoiner(channel, Joiner(provider, device, code, namespace, context), confirmSas)
+    }
+
+    /** The ceremony body, shared verbatim by the legacy and negotiated inviter entry points. */
+    private suspend fun ferryInviter(
         channel: FrameChannel,
         inviter: Inviter,
         confirmSas: suspend (String) -> Boolean,
@@ -54,10 +135,8 @@ object PairingFerry {
         }
     }
 
-    /**
-     * Runs the joining side over a connected [channel]. Returns the recovered context master key.
-     */
-    suspend fun runJoiner(
+    /** The ceremony body, shared verbatim by the legacy and negotiated joiner entry points. */
+    private suspend fun ferryJoiner(
         channel: FrameChannel,
         joiner: Joiner,
         confirmSas: suspend (String) -> Boolean,
