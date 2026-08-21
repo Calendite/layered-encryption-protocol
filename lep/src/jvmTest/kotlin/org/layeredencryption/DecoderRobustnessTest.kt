@@ -146,6 +146,25 @@ class DecoderRobustnessTest {
         assertOnlyThrows(pairingExceptionOnly, mutations(helloFrame)) { PairingWire.decodeInviterHello(it) }
 
     @Test
+    fun asyncWireFrames_throwOnlyPairingException() {
+        val response = org.layeredencryption.invite.AsyncWire.encode(
+            org.layeredencryption.invite.AsyncJoinerResponse(
+                provider.randomBytes(XWing.CIPHERTEXT_SIZE), founder.identity,
+                provider.randomBytes(32), provider.randomBytes(32),
+            ),
+        )
+        val delivery = org.layeredencryption.invite.AsyncWire.encode(
+            org.layeredencryption.invite.AsyncDelivery(provider.randomBytes(32), logBytes),
+        )
+        assertOnlyThrows(pairingExceptionOnly, mutations(response)) {
+            org.layeredencryption.invite.AsyncWire.decodeJoinerResponse(it)
+        }
+        assertOnlyThrows(pairingExceptionOnly, mutations(delivery)) {
+            org.layeredencryption.invite.AsyncWire.decodeDelivery(it)
+        }
+    }
+
+    @Test
     fun suiteNegotiationFrames_throwOnlyPairingException() {
         val offer = PairingWire.encode(
             SuiteOffer(provider.randomBytes(32), listOf(SuiteId.LEP_HYBRID_2026), SuiteId.LEP_HYBRID_2026),

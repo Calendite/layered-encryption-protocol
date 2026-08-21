@@ -7,6 +7,7 @@ import org.layeredencryption.envelope.LaneEnvelope
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.identity.DeviceIdentityV2
 import org.layeredencryption.identity.KeyTransition
+import org.layeredencryption.invite.AsyncWire
 import org.layeredencryption.invite.InviteBundle
 import org.layeredencryption.invite.InviteBundleV2
 import org.layeredencryption.invite.InviteLink
@@ -96,6 +97,21 @@ class DecoderFuzz {
             { PairingWire.decodeSasConfirmed(it) },
             PairingWire::decodeSuiteOffer,
             PairingWire::decodeSuiteAccept,
+        )) {
+            try {
+                decode(data)
+            } catch (expected: PairingException) {
+                // The single documented failure mode.
+            }
+        }
+    }
+
+    /** Contract: [PairingException] is the only exception the async wire boundary lets out. */
+    @FuzzTest(maxDuration = "30s")
+    fun asyncWire(data: ByteArray) {
+        for (decode in listOf<(ByteArray) -> Any?>(
+            AsyncWire::decodeJoinerResponse,
+            AsyncWire::decodeDelivery,
         )) {
             try {
                 decode(data)
