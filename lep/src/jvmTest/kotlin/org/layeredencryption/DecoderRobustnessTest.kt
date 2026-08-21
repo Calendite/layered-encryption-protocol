@@ -101,6 +101,18 @@ class DecoderRobustnessTest {
     }
 
     @Test
+    fun inviteBundleV2_throwsOnlyIllegalArgument() {
+        val keys = DeviceKeysV2.generate(provider, org.layeredencryption.suite.Suite1)
+        val bundle = org.layeredencryption.invite.InviteBundleV2.build(
+            provider, XWing.generateKeyPair(provider).publicKey, keys,
+            expiryEpochSeconds = 1_000_000L, ridAsync = provider.randomBytes(32),
+        ).serialise()
+        assertOnlyThrows(illegalArgumentOnly, mutations(bundle)) {
+            org.layeredencryption.invite.InviteBundleV2.deserialise(it)
+        }
+    }
+
+    @Test
     fun keyTransition_throwsOnlyIllegalArgument() {
         val transition = KeyTransition.create(
             provider, founder, DeviceKeysV2.rebind(provider, founder, org.layeredencryption.suite.Suite1),
