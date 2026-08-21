@@ -3,7 +3,10 @@ package org.layeredencryption
 import org.layeredencryption.envelope.EpochKeys
 import org.layeredencryption.envelope.LaneEnvelope
 import org.layeredencryption.identity.DeviceIdentity
+import org.layeredencryption.identity.DeviceIdentityV2
 import org.layeredencryption.identity.DeviceKeys
+import org.layeredencryption.identity.DeviceKeysV2
+import org.layeredencryption.identity.KeyTransition
 import org.layeredencryption.invite.InviteBundle
 import org.layeredencryption.membership.MembershipLog
 import org.layeredencryption.membership.MembershipOp
@@ -90,6 +93,20 @@ class DecoderRobustnessTest {
     @Test
     fun deviceIdentity_throwsOnlyIllegalArgument() =
         assertOnlyThrows(illegalArgumentOnly, mutations(identityBytes)) { DeviceIdentity.deserialise(it) }
+
+    @Test
+    fun deviceIdentityV2_throwsOnlyIllegalArgument() {
+        val v2 = DeviceKeysV2.generate(provider, org.layeredencryption.suite.Suite1).identity.serialise()
+        assertOnlyThrows(illegalArgumentOnly, mutations(v2)) { DeviceIdentityV2.deserialise(it) }
+    }
+
+    @Test
+    fun keyTransition_throwsOnlyIllegalArgument() {
+        val transition = KeyTransition.create(
+            provider, founder, DeviceKeysV2.rebind(provider, founder, org.layeredencryption.suite.Suite1),
+        ).serialise()
+        assertOnlyThrows(illegalArgumentOnly, mutations(transition)) { KeyTransition.deserialise(it) }
+    }
 
     @Test
     fun membershipLog_throwsOnlyIllegalArgument() =

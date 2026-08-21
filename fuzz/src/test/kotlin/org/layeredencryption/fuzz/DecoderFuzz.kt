@@ -5,6 +5,8 @@ import org.layeredencryption.FrameReader
 import org.layeredencryption.envelope.EpochKeys
 import org.layeredencryption.envelope.LaneEnvelope
 import org.layeredencryption.identity.DeviceIdentity
+import org.layeredencryption.identity.DeviceIdentityV2
+import org.layeredencryption.identity.KeyTransition
 import org.layeredencryption.invite.InviteBundle
 import org.layeredencryption.invite.InviteLink
 import org.layeredencryption.membership.MembershipLog
@@ -45,6 +47,12 @@ class DecoderFuzz {
 
     @FuzzTest(maxDuration = "30s")
     fun deviceIdentity(data: ByteArray) = allowIllegalArgument { DeviceIdentity.deserialise(data) }
+
+    @FuzzTest(maxDuration = "30s")
+    fun deviceIdentityV2(data: ByteArray) = allowIllegalArgument { DeviceIdentityV2.deserialise(data) }
+
+    @FuzzTest(maxDuration = "30s")
+    fun keyTransition(data: ByteArray) = allowIllegalArgument { KeyTransition.deserialise(data) }
 
     @FuzzTest(maxDuration = "30s")
     fun inviteBundle(data: ByteArray) = allowIllegalArgument { InviteBundle.deserialise(data) }

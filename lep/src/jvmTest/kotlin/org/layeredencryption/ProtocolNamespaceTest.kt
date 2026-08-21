@@ -62,6 +62,9 @@ class ProtocolNamespaceTest {
         "v1/pairing-negotiated" to "calendite/v1/pairing-negotiated",
         "v1/sas-negotiated" to "calendite/v1/sas-negotiated",
         "v2/member-key-wrap" to "calendite/v2/member-key-wrap",
+        "v4/device-identity" to "calendite/v4/device-identity",
+        "v1/key-transition" to "calendite/v1/key-transition",
+        "v3/invite-bundle" to "calendite/v3/invite-bundle",
     )
 
     @Test

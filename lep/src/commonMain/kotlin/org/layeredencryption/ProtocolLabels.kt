@@ -118,6 +118,29 @@ internal object ProtocolLabels {
     const val MEMBER_KEY_WRAP_SUITED = "v2/member-key-wrap"
 
     /**
+     * Version 2 (suited) device-identity binding signature.
+     *
+     * v4 of the identity-binding family: the signed message grew a format version and the binary
+     * suite id, and the signature verifies under the identity's own suite. [DEVICE_IDENTITY]
+     * stays frozen for v1 identities, which remain Suite 1 artifacts forever.
+     */
+    const val DEVICE_IDENTITY_SUITED = "v4/device-identity"
+
+    /**
+     * KeyTransition dual signature: the continuity proof binding an old (v1) identity to its
+     * suited (v2) replacement, signed by both — without it a replacement identity is
+     * indistinguishable from an unrelated new device (the migration brief §2).
+     */
+    const val KEY_TRANSITION = "v1/key-transition"
+
+    /**
+     * Version 2 (suited) async invite bundle signature; the signed payload carries the format
+     * version and binary suite id, and verifies under the bundle's suite. [INVITE_BUNDLE] stays
+     * frozen for v1 bundles.
+     */
+    const val INVITE_BUNDLE_SUITED = "v3/invite-bundle"
+
+    /**
      * Context (shared dataset) identifier.
      *
      * v2 changes what the id is derived *from*, not merely its spelling. It used to hash the master
@@ -138,5 +161,6 @@ internal object ProtocolLabels {
         MEMBERSHIP, INVITE_BUNDLE, TRANSCRIPT_ASYNC, PAIRING_ASYNC, ASYNC_LINK_AUTH, RENDEZVOUS,
         RENDEZVOUS_ASYNC, CONTEXT_ID,
         TRANSCRIPT_NEGOTIATED, PAIRING_NEGOTIATED, SAS_NEGOTIATED, MEMBER_KEY_WRAP_SUITED,
+        DEVICE_IDENTITY_SUITED, KEY_TRANSITION, INVITE_BUNDLE_SUITED,
     )
 }

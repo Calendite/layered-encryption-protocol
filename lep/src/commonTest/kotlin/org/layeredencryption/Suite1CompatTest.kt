@@ -80,7 +80,7 @@ class Suite1CompatTest {
                 "rendezvous/v1", "rendezvous-async/v1", "context-id/v2",
                 // Phase 1 crypto agility.
                 "v1/transcript-negotiated", "v1/pairing-negotiated", "v1/sas-negotiated",
-                "v2/member-key-wrap",
+                "v2/member-key-wrap", "v4/device-identity", "v1/key-transition", "v3/invite-bundle",
             ),
             ProtocolLabels.ALL,
         )
