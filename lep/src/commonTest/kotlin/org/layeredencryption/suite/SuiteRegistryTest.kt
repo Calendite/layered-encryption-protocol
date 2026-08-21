@@ -52,7 +52,7 @@ class SuiteRegistryTest {
     }
 
     @Test
-    fun suite1DeterministicOperations_matchTheFacadesByteForByte() {
+    fun suite1KeyAndSigningOperations_matchTheFacades() {
         val provider = provider ?: return
         val seed = ByteArray(32) { it.toByte() }
 
@@ -71,14 +71,14 @@ class SuiteRegistryTest {
 
         val signing = Suite1.signature.generateKeyPair(provider)
         val message = "suite equivalence".encodeToByteArray()
+        // Cross-verified rather than byte-compared: ML-DSA-65 signing is hedged (randomised) on
+        // some providers (Noble) and deterministic on others (Bouncy Castle), so two signings of
+        // the same message need not match. Byte-exact reproduction is pinned on the JVM reference
+        // provider by Suite1ReproductionTest; here the contract is interchangeability.
         val suiteSignature = Suite1.signature.sign(provider, signing.privateKey, message)
-        assertContentEquals(
-            HybridSignature.sign(provider, signing.privateKey, message),
-            suiteSignature,
-            "hybrid signing is deterministic, so suite and facade must agree byte for byte",
-        )
         assertTrue(HybridSignature.verify(provider, signing.publicKey, message, suiteSignature))
-        assertTrue(Suite1.signature.verify(provider, signing.publicKey, message, suiteSignature))
+        val facadeSignature = HybridSignature.sign(provider, signing.privateKey, message)
+        assertTrue(Suite1.signature.verify(provider, signing.publicKey, message, facadeSignature))
         assertContentEquals(
             HybridSignature.classicalPublic(signing.publicKey),
             Suite1.signature.classicalPublic(signing.publicKey),
