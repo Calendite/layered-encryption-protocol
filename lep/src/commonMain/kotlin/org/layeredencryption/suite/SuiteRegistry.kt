@@ -15,16 +15,16 @@ package org.layeredencryption.suite
  * brief's "Suite 2: reserve, but do not invent") — existing entries are never edited or removed
  * while any user may still hold data under them.
  */
-object SuiteRegistry {
+object SuiteRegistry : SuiteResolver {
 
     private val suites: Map<SuiteId, ProtocolSuite> = listOf<ProtocolSuite>(Suite1)
         .associateBy { it.id }
 
     /** The suite registered under [id], or [UnsupportedSuiteException] — there is no fallback. */
-    fun require(id: SuiteId): ProtocolSuite = suites[id] ?: throw UnsupportedSuiteException(id)
+    override fun require(id: SuiteId): ProtocolSuite = suites[id] ?: throw UnsupportedSuiteException(id)
 
-    fun contains(id: SuiteId): Boolean = id in suites
+    override fun contains(id: SuiteId): Boolean = id in suites
 
-    /** Every registered id, for capability advertisement once Phase 1 adds negotiation. */
-    val known: Set<SuiteId> get() = suites.keys
+    /** Every registered id, for capability advertisement in negotiation. */
+    override val known: Set<SuiteId> get() = suites.keys
 }

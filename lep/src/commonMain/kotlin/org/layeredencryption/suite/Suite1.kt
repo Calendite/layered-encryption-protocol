@@ -32,6 +32,9 @@ object Suite1 : ProtocolSuite {
     override val id: SuiteId = SuiteId.LEP_HYBRID_2026
     override val name: String = "LEP_HYBRID_2026"
 
+    /** NIST category 1-3 hybrid (X25519/ML-KEM-768, Ed25519/ML-DSA-65): rank 1, the baseline. */
+    override val strength: Int = 1
+
     override val kem: SuiteKem = object : SuiteKem {
         override val publicKeySize: Int get() = XWing.PUBLIC_KEY_SIZE
         override val ciphertextSize: Int get() = XWing.CIPHERTEXT_SIZE
@@ -77,6 +80,9 @@ object Suite1 : ProtocolSuite {
     }
 
     override val aead: SuiteAead = object : SuiteAead {
+        /** `innerNonce(12) ‖ outerNonce(12) ‖ aes(chacha(pt + tag 16) + tag 16)`. */
+        override fun sealedSize(plaintextSize: Int): Int = 12 + 12 + plaintextSize + 16 + 16
+
         override fun seal(
             provider: CryptoProvider,
             masterKey: ByteArray,

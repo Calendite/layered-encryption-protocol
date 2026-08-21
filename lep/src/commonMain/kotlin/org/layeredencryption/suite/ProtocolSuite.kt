@@ -29,6 +29,17 @@ interface ProtocolSuite {
     /** A stable human-readable name for logs and diagnostics, e.g. `"LEP_HYBRID_2026"`. */
     val name: String
 
+    /**
+     * The suite's frozen strength rank, curator-assigned at registration and never edited —
+     * anchored to the NIST security category of its weakest required component (Suite 1 = 1).
+     *
+     * Used ONLY by negotiation's "strongest mutually supported" selection. Deliberately not the
+     * numeric [id]: ids are assigned chronologically, and a legitimate implementation-diversity
+     * suite can arrive at the *same* strength with a higher id. Upgrade direction is likewise not
+     * governed by strength — suite transitions are monotonic in [id] (see the migration brief).
+     */
+    val strength: Int
+
     val kem: SuiteKem
     val signature: SuiteSignature
     val aead: SuiteAead
@@ -77,6 +88,14 @@ interface SuiteSignature {
  * [seal] and [open].
  */
 interface SuiteAead {
+    /**
+     * The exact size of a sealed blob for a [plaintextSize]-byte plaintext. Every LEP AEAD
+     * construction is deterministic in size (nonces + ciphertext + tags), which is what lets
+     * fixed-width decoders — the wrapped-keys parser above all — validate a sealed field to a
+     * single legal length instead of a range.
+     */
+    fun sealedSize(plaintextSize: Int): Int
+
     fun seal(
         provider: CryptoProvider,
         masterKey: ByteArray,

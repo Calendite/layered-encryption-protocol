@@ -56,6 +56,12 @@ class ProtocolNamespaceTest {
         // v2 changes the derivation itself (genesis hash rather than master key), which orphans
         // pairings regardless, so the spelling finally comes along for the ride.
         "context-id/v2" to "calendite/context-id/v2",
+        // Phase 1 crypto agility (additions, acknowledged deliberately — additions are legal,
+        // edits to shipped labels are not).
+        "v1/transcript-negotiated" to "calendite/v1/transcript-negotiated",
+        "v1/pairing-negotiated" to "calendite/v1/pairing-negotiated",
+        "v1/sas-negotiated" to "calendite/v1/sas-negotiated",
+        "v2/member-key-wrap" to "calendite/v2/member-key-wrap",
     )
 
     @Test

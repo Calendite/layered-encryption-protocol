@@ -91,6 +91,33 @@ internal object ProtocolLabels {
     const val RENDEZVOUS_ASYNC = "rendezvous-async/v1"
 
     /**
+     * Negotiated-pairing transcript hash (Phase 1 crypto agility).
+     *
+     * The negotiated flow binds the raw suite-offer and suite-accept frames, plus the selected
+     * suite id, ahead of the classic transcript fields — a different construction from
+     * [TRANSCRIPT], so a different label. The binary suite id is additionally framed into the
+     * transcript and appended to every derived-key `info`: the label alone is never the suite
+     * selector (migration brief §7).
+     */
+    const val TRANSCRIPT_NEGOTIATED = "v1/transcript-negotiated"
+
+    /** Negotiated-pairing master-key derivation; the 2-byte suite id is appended to the info. */
+    const val PAIRING_NEGOTIATED = "v1/pairing-negotiated"
+
+    /** Negotiated-pairing SAS derivation; the 2-byte suite id is appended to the info. */
+    const val SAS_NEGOTIATED = "v1/sas-negotiated"
+
+    /**
+     * Suite-parameterised member-key wrap (SUITE_UPGRADE and post-upgrade rotations); the 2-byte
+     * suite id is appended to the info. [MEMBER_KEY_WRAP] stays frozen for Suite 1 entries.
+     *
+     * When a real Suite 2 is standardized, its *internal* domain labels (layer keys and the
+     * like) get their own `LEP-SUITE-NNNN/<operation>/<version>` namespace per the migration
+     * brief — added here, to [ALL], and to the freeze tests at that point.
+     */
+    const val MEMBER_KEY_WRAP_SUITED = "v2/member-key-wrap"
+
+    /**
      * Context (shared dataset) identifier.
      *
      * v2 changes what the id is derived *from*, not merely its spelling. It used to hash the master
@@ -110,5 +137,6 @@ internal object ProtocolLabels {
         MEMBER_KEY_WRAP,
         MEMBERSHIP, INVITE_BUNDLE, TRANSCRIPT_ASYNC, PAIRING_ASYNC, ASYNC_LINK_AUTH, RENDEZVOUS,
         RENDEZVOUS_ASYNC, CONTEXT_ID,
+        TRANSCRIPT_NEGOTIATED, PAIRING_NEGOTIATED, SAS_NEGOTIATED, MEMBER_KEY_WRAP_SUITED,
     )
 }

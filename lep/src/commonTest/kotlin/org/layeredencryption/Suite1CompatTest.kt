@@ -70,13 +70,17 @@ class Suite1CompatTest {
     @Test
     fun protocolLabelsAreFrozen() {
         // The jvmTest freeze test already pins these; repeating the full set here guards the
-        // platforms that only run commonTest (wasmJs, Android unit) too.
+        // platforms that only run commonTest (wasmJs, Android unit) too. Additions are legal and
+        // acknowledged here deliberately; edits to shipped labels are not.
         assertEquals(
             setOf(
                 "v1/layer-chacha", "v1/layer-aes", "v1/transcript", "v1/pairing", "v1/code-secret",
                 "v2/sas-commitment", "v3/device-identity", "v1/member-key-wrap", "v2/membership",
                 "v2/invite-bundle", "v1/transcript-async", "v1/pairing-async", "v1/async-link-auth",
                 "rendezvous/v1", "rendezvous-async/v1", "context-id/v2",
+                // Phase 1 crypto agility.
+                "v1/transcript-negotiated", "v1/pairing-negotiated", "v1/sas-negotiated",
+                "v2/member-key-wrap",
             ),
             ProtocolLabels.ALL,
         )

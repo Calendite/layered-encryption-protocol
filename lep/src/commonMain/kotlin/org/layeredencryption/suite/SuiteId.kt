@@ -10,6 +10,9 @@ import kotlin.jvm.JvmInline
  * and domain-separation labels together. Ids are assigned once and never reused or renumbered:
  * they will eventually appear inside signed transcripts, KDF contexts, and AEAD associated data,
  * where a renumbering is a silent protocol break. An id unknown to [SuiteRegistry] fails closed.
+ *
+ * Ids `0xFF00`–`0xFFFE` are reserved for test suites and will never be assigned to a production
+ * suite; `0xFFFF` is permanently invalid, kept free for fail-closed tests.
  */
 @JvmInline
 value class SuiteId(val value: UShort) {
