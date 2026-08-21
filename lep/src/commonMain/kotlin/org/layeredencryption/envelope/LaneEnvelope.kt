@@ -9,7 +9,11 @@ import org.layeredencryption.FrameWriter
 import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.decodeUtf8Strict
+import org.layeredencryption.suite.ProtocolSuite
 import org.layeredencryption.suite.Suite1
+import org.layeredencryption.suite.SuiteId
+import org.layeredencryption.suite.SuiteRegistry
+import org.layeredencryption.suite.SuiteResolver
 
 /**
  * One encrypted op in a device's lane (docs/Protocol.md §7.1).
@@ -35,14 +39,27 @@ class LaneEnvelope(
     val seq: Int,
     val epoch: Int,
     ciphertext: ByteArray,
+    /**
+     * Version 3 only: the suite that sealed this envelope, named in the header and bound into
+     * the associated data — a relay cannot re-label an op's suite any more than its lane. Null
+     * for version 2, whose bytes are frozen (implicitly Suite 1).
+     */
+    val suiteId: SuiteId? = null,
 ) {
     private val _ciphertext = ciphertext.copyOf()
+
+    init {
+        require((suiteId != null) == (version == VERSION_SUITED)) {
+            "A suite id appears in exactly the version-$VERSION_SUITED header"
+        }
+    }
 
     /** A defensive copy; the envelope's own bytes cannot be mutated after construction. */
     val ciphertext: ByteArray get() = _ciphertext.copyOf()
 
     fun serialise(): ByteArray = FrameWriter()
         .putBytes(version.toString().encodeToByteArray())
+        .apply { suiteId?.let { putBytes(it.value.toString().encodeToByteArray()) } }
         .putBytes(contextId.encodeToByteArray())
         .putBytes(lane.encodeToByteArray())
         .putBytes(seq.toString().encodeToByteArray())
@@ -53,6 +70,7 @@ class LaneEnvelope(
     /** The header bytes bound as AEAD associated data — re-labelling an op breaks decryption. */
     internal fun associatedData(): ByteArray = FrameWriter()
         .putBytes(version.toString().encodeToByteArray())
+        .apply { suiteId?.let { putBytes(it.value.toString().encodeToByteArray()) } }
         .putBytes(contextId.encodeToByteArray())
         .putBytes(lane.encodeToByteArray())
         .putBytes(seq.toString().encodeToByteArray())
@@ -63,22 +81,36 @@ class LaneEnvelope(
         /** v2 added [epoch]. A v1 reader would take that field for the ciphertext. */
         const val VERSION = 2
 
+        /** v3 adds [suiteId] to the header and the associated data (the migration brief §6). */
+        const val VERSION_SUITED = 3
+
         /** Generous bound on the id/lane strings; real values are ~64-char hex names. */
         private const val MAX_NAME_BYTES = 1024
 
         /**
-         * Strict: the version must be exactly [VERSION] (an unknown version is rejected *here*,
-         * before any of its fields are believed), numeric fields must be canonical non-negative
-         * decimal, strings must be valid UTF-8 within [MAX_NAME_BYTES], and the frame must be
-         * fully consumed. Every failure is an [IllegalArgumentException].
+         * Strict: the version must be [VERSION] or [VERSION_SUITED] (an unknown version is
+         * rejected *here*, before any of its fields are believed — and so is a v3 suite id the
+         * [resolver] does not know: an envelope this build cannot decrypt is unreadable by
+         * design, never approximated). Numeric fields must be canonical non-negative decimal,
+         * strings valid UTF-8 within [MAX_NAME_BYTES], and the frame fully consumed. Every
+         * failure is an [IllegalArgumentException].
          */
-        fun deserialise(bytes: ByteArray): LaneEnvelope {
+        fun deserialise(bytes: ByteArray, resolver: SuiteResolver = SuiteRegistry): LaneEnvelope {
             require(bytes.size <= ProtocolLimits.MAX_ENVELOPE_BYTES) {
                 "Envelope of ${bytes.size} bytes exceeds the ${ProtocolLimits.MAX_ENVELOPE_BYTES}-byte limit"
             }
             val reader = FrameReader(bytes)
             val version = canonicalNonNegativeInt(reader.readBytes(MAX_INT_DIGITS))
-            require(version == VERSION) { "Unsupported envelope version $version" }
+            require(version == VERSION || version == VERSION_SUITED) { "Unsupported envelope version $version" }
+            val suiteId = if (version == VERSION_SUITED) {
+                val value = canonicalNonNegativeInt(reader.readBytes(MAX_INT_DIGITS))
+                require(value <= 0xFFFF) { "Suite id out of range: $value" }
+                val id = SuiteId(value.toUShort())
+                require(resolver.contains(id)) { "Unknown suite $value" }
+                id
+            } else {
+                null
+            }
             val envelope = LaneEnvelope(
                 version = version,
                 contextId = readName(reader),
@@ -86,6 +118,7 @@ class LaneEnvelope(
                 seq = canonicalNonNegativeInt(reader.readBytes(MAX_INT_DIGITS)),
                 epoch = canonicalNonNegativeInt(reader.readBytes(MAX_INT_DIGITS)),
                 ciphertext = reader.readBytes(),
+                suiteId = suiteId,
             )
             reader.expectEnd()
             return envelope
@@ -132,6 +165,34 @@ class LaneEnvelope(
             )
             return LaneEnvelope(VERSION, contextId, lane, seq, epoch, ciphertext)
         }
+
+        /**
+         * Seals a **version 3** envelope under [suite] — the suite the context's
+         * [org.layeredencryption.membership.SuiteSchedule] names for the current epoch
+         * (`schedule.suiteAt(keys.current)`); a suite transition is a membership event and an
+         * epoch boundary, so the suite is never a per-envelope choice. The suite id is named in
+         * the header and bound into the associated data.
+         *
+         * [seal] (version 2) remains the default for Suite 1 contexts: v2 bytes are frozen, and
+         * the migration brief keeps creating Suite 1 data until the new paths are audited.
+         */
+        fun sealSuited(
+            provider: CryptoProvider,
+            keys: EpochKeys,
+            suite: ProtocolSuite,
+            contextId: String,
+            lane: String,
+            seq: Int,
+            plaintext: ByteArray,
+            namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        ): LaneEnvelope {
+            val epoch = keys.current
+            val header = LaneEnvelope(VERSION_SUITED, contextId, lane, seq, epoch, ByteArray(0), suite.id)
+            val ciphertext = suite.aead.seal(
+                provider, keys.currentKey, plaintext, aad = header.associatedData(), namespace = namespace,
+            )
+            return LaneEnvelope(VERSION_SUITED, contextId, lane, seq, epoch, ciphertext, suite.id)
+        }
     }
 
     /**
@@ -150,11 +211,15 @@ class LaneEnvelope(
         provider: CryptoProvider,
         keys: EpochKeys,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
     ): ByteArray {
         val key = keys[epoch] ?: throw CryptoException(
             "No key for epoch $epoch: this device was added after that rotation",
         )
-        return Suite1.aead.open(provider, key, _ciphertext, aad = associatedData(), namespace = namespace)
+        // A v2 envelope is Suite 1 by definition; a v3 envelope opens under the suite its
+        // authenticated header names — an unknown one already failed closed at deserialise.
+        val aead = suiteId?.let { resolver.require(it).aead } ?: Suite1.aead
+        return aead.open(provider, key, _ciphertext, aad = associatedData(), namespace = namespace)
     }
 
     /**
@@ -198,6 +263,7 @@ class LaneEnvelope(
         expectedLane: String,
         freshness: FreshnessStore,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
         deliver: (ByteArray) -> T,
     ): T {
         if (contextId != expectedContextId) {
@@ -213,7 +279,7 @@ class LaneEnvelope(
             throw ReplayException("Stale envelope for lane '$lane': seq=$seq epoch=$epoch is not fresh")
         }
 
-        val plaintext = openWithoutReplayProtection(provider, keys, namespace)
+        val plaintext = openWithoutReplayProtection(provider, keys, namespace, resolver)
 
         // Decision, delivery, and watermark are one store transaction (the 6ddd7e4 retest,
         // finding 2): the freshness check is re-run where no competing sequence can race it, so

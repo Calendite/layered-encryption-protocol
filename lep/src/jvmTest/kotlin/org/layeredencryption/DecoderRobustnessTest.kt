@@ -100,6 +100,15 @@ class DecoderRobustnessTest {
         assertOnlyThrows(illegalArgumentOnly, mutations(envelopeBytes)) { LaneEnvelope.deserialise(it) }
 
     @Test
+    fun laneEnvelopeV3_throwsOnlyIllegalArgument() {
+        val v3 = LaneEnvelope.sealSuited(
+            provider, EpochKeys.founding(provider.randomBytes(32)), org.layeredencryption.suite.Suite1,
+            "ctx", "device-1", seq = 7, plaintext = "op".encodeToByteArray(),
+        ).serialise()
+        assertOnlyThrows(illegalArgumentOnly, mutations(v3)) { LaneEnvelope.deserialise(it) }
+    }
+
+    @Test
     fun inviteBundle_throwsOnlyIllegalArgument() =
         assertOnlyThrows(illegalArgumentOnly, mutations(bundleBytes)) { InviteBundle.deserialise(it) }
 
