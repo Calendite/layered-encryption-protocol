@@ -20,11 +20,19 @@ object SuiteRegistry : SuiteResolver {
     private val suites: Map<SuiteId, ProtocolSuite> = listOf<ProtocolSuite>(Suite1)
         .associateBy { it.id }
 
+    /**
+     * A defensive copy taken once, not the map's live key view. Kotlin's `Set` is read-only at
+     * the interface, not immutable at runtime: on the JVM a caller could cast the backing view
+     * to `MutableSet` and remove an entry, mutating the registry itself — which is exactly the
+     * "no registration API" property this object exists to guarantee.
+     */
+    private val knownIds: Set<SuiteId> = suites.keys.toSet()
+
     /** The suite registered under [id], or [UnsupportedSuiteException] — there is no fallback. */
     override fun require(id: SuiteId): ProtocolSuite = suites[id] ?: throw UnsupportedSuiteException(id)
 
     override fun contains(id: SuiteId): Boolean = id in suites
 
     /** Every registered id, for capability advertisement in negotiation. */
-    override val known: Set<SuiteId> get() = suites.keys
+    override val known: Set<SuiteId> get() = knownIds
 }

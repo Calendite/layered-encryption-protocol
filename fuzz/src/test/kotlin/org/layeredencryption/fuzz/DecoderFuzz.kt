@@ -49,9 +49,6 @@ class DecoderFuzz {
     fun deviceIdentity(data: ByteArray) = allowIllegalArgument { DeviceIdentity.deserialise(data) }
 
     @FuzzTest(maxDuration = "30s")
-    fun deviceIdentityV2(data: ByteArray) = allowIllegalArgument { DeviceIdentity.deserialise(data) }
-
-    @FuzzTest(maxDuration = "30s")
     fun keyTransition(data: ByteArray) = allowIllegalArgument { KeyTransition.deserialise(data) }
 
     @FuzzTest(maxDuration = "30s")

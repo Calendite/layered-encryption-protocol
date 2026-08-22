@@ -76,11 +76,27 @@ object Cascade {
         return provider.chaCha20Poly1305Open(chachaKey, innerNonce, inner, aad)
     }
 
+    /**
+     * Both layer keys, derived from an already-uniform 32-byte secret.
+     *
+     * The length is required, not merely expected (LEP-R13). HKDF is an *extract-and-expand*
+     * function, not a password hash: hand it a short or low-entropy input — a passphrase
+     * someone decided to use directly, a truncated restore, an empty placeholder — and it will
+     * cheerfully produce two perfectly well-formed 32-byte layer keys carrying none of the
+     * entropy this construction's security argument assumes. Every key that legitimately
+     * reaches here (context keys, handshake and async keys, member wrap keys, at-rest store
+     * keys) is already a uniform 32 bytes, so anything else is a caller error worth failing on.
+     * Password-derived keys need a memory-hard KDF with explicit parameters and a salt, which
+     * is a deliberate decision for the application to make, not one to stumble into here.
+     */
     private fun deriveLayerKeys(
         provider: CryptoProvider,
         masterKey: ByteArray,
         namespace: ProtocolNamespace,
     ): Pair<ByteArray, ByteArray> {
+        require(masterKey.size == KEY_SIZE) {
+            "The cascade master key is exactly $KEY_SIZE uniform bytes, was ${masterKey.size}"
+        }
         val chachaKey = provider.hkdfSha256(masterKey, salt = null, info = namespace.label(SUFFIX_CHACHA), length = KEY_SIZE)
         val aesKey = provider.hkdfSha256(masterKey, salt = null, info = namespace.label(SUFFIX_AES), length = KEY_SIZE)
         return chachaKey to aesKey

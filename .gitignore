@@ -5,3 +5,17 @@ local.properties
 .kotlin/
 .DS_Store
 /kmp-diagnostics/
+
+# Internal review and fix-plan working notes. The published specification lives in docs/
+# (Protocol.md, Encryption.md, POST_QUANTUM_HARDENING_AND_MIGRATION.md); these are the
+# point-in-time assessments and remediation plans behind it. They name findings against
+# specific historical commits, so publishing them as-is would misrepresent the current
+# state — CURRENT_SECURITY_HOLES.md, for one, reviews a commit whose findings are fixed.
+# Publish a curated SECURITY.md and threat model instead.
+docs/docs/
+docs/fixes/
+docs/CURRENT_SECURITY_HOLES.md
+docs/Character_Taxonomy.md
+docs/LEP-*.md
+docs/SECURITY_RETEST_*.md
+docs/LEP_SECURITY_REVIEW_AND_REMEDIATION_PLAN_*.md

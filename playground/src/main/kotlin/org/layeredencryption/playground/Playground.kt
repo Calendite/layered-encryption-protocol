@@ -24,6 +24,7 @@ import org.layeredencryption.pairing.PairingCode
 import org.layeredencryption.pairing.PairingFerry
 import org.layeredencryption.toHexString
 import java.net.InetSocketAddress
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.Executors
@@ -73,7 +74,7 @@ private class Session(
  * A's port, and every frame of the ceremony crosses a real socket.
  */
 private fun pairTwoDevices(): Session {
-    val listener = ServerSocket(DEVICE_A_PORT)
+    val listener = loopbackListener(DEVICE_A_PORT)
     val code = PairingCode.generate(provider)
     events.add("pairing", "A", "Pairing code generated", "Device A is listening on port $DEVICE_A_PORT. The code the other device must be told: ${code.display}")
 
@@ -133,7 +134,7 @@ private class SocketChannel(private val socket: Socket, private val side: String
 
     override suspend fun receive(): ByteArray {
         val header = ByteArray(4).also { readFully(it) }
-        val frame = ByteArray(bytesToInt(header, 0)).also { readFully(it) }
+        val frame = ByteArray(frameLength(bytesToInt(header, 0))).also { readFully(it) }
         return frame
     }
 
@@ -219,13 +220,13 @@ private fun sendMessage(session: Session, text: String, tamper: Boolean) {
         hex = wire.toHexString(),
     )
 
-    val listener = ServerSocket(DEVICE_B_PORT)
+    val listener = loopbackListener(DEVICE_B_PORT)
     var received: ByteArray? = null
     val receiver = thread {
         listener.accept().use { socket ->
             val header = ByteArray(4)
             socket.getInputStream().readNBytes(header, 0, 4)
-            received = socket.getInputStream().readNBytes(bytesToInt(header, 0))
+            received = socket.getInputStream().readNBytes(frameLength(bytesToInt(header, 0)))
         }
     }
     Thread.sleep(60)
@@ -290,14 +291,18 @@ private fun sendMessage(session: Session, text: String, tamper: Boolean) {
 }
 
 private fun startWebServer(session: Session) {
-    val server = HttpServer.create(InetSocketAddress(WEB_PORT), 0)
+    val server = HttpServer.create(InetSocketAddress(InetAddress.getLoopbackAddress(), WEB_PORT), 0)
     server.executor = Executors.newFixedThreadPool(4)
 
     server.createContext("/") { exchange ->
         respond(exchange, 200, "text/html; charset=utf-8", PLAYGROUND_PAGE)
     }
     server.createContext("/send") { exchange ->
-        val body = exchange.requestBody.readBytes().decodeToString()
+        if (exchange.requestMethod != "POST") {
+            respond(exchange, 405, "text/plain", "POST only")
+            return@createContext
+        }
+        val body = readBoundedBody(exchange) ?: return@createContext
         val text = body.substringAfter("text=", "").substringBefore("&tamper").let(::urlDecode)
         val tamper = body.contains("tamper=true")
         runCatching { sendMessage(session, text.ifBlank { "(nothing typed)" }, tamper) }
@@ -305,10 +310,53 @@ private fun startWebServer(session: Session) {
         respond(exchange, 200, "application/json", """{"ok":true}""")
     }
     server.createContext("/events") { exchange ->
+        if (exchange.requestMethod != "GET") {
+            respond(exchange, 405, "text/plain", "GET only")
+            return@createContext
+        }
         respond(exchange, 200, "application/json", events.asJson())
     }
     server.start()
 }
+
+/**
+ * A listener bound to loopback only.
+ *
+ * `ServerSocket(port)` binds every interface, which would put this demonstration — an
+ * unauthenticated service that accepts messages and hands back plaintext and key-adjacent
+ * event data — on whatever network the machine is attached to. People run security demos
+ * casually, in cafés and on conference wifi, so the safe binding is the only binding offered.
+ */
+private fun loopbackListener(port: Int): ServerSocket =
+    ServerSocket(port, 0, InetAddress.getLoopbackAddress())
+
+/**
+ * Validates a peer-supplied frame length before it is used to allocate.
+ *
+ * The length arrives from the socket, so it is attacker-controlled: a negative value would
+ * throw deep inside an allocation, and a large one would let a single 4-byte write reserve
+ * gigabytes. The library's own transport bound is the right ceiling for its demo.
+ */
+private fun frameLength(declared: Int): Int {
+    require(declared in 0..FrameChannel.MAX_FRAME_BYTES) { "Refusing a $declared-byte frame" }
+    return declared
+}
+
+/**
+ * Reads a request body up to a small cap, answering 413 rather than buffering whatever a client
+ * decides to send. The demo's form is a sentence; anything larger is a mistake or an attempt.
+ */
+private fun readBoundedBody(exchange: HttpExchange): String? {
+    val body = exchange.requestBody.readNBytes(MAX_REQUEST_BODY_BYTES + 1)
+    if (body.size > MAX_REQUEST_BODY_BYTES) {
+        respond(exchange, 413, "text/plain", "Request body too large")
+        return null
+    }
+    return body.decodeToString()
+}
+
+/** A generous bound for a form that carries one typed sentence. */
+private const val MAX_REQUEST_BODY_BYTES = 8 * 1024
 
 private fun respond(exchange: HttpExchange, status: Int, type: String, body: String) {
     val bytes = body.encodeToByteArray()

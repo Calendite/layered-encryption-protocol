@@ -45,6 +45,9 @@ import org.layeredencryption.bytesToInt
  * store stops a retired-epoch holder forging fresh traffic. An attacker holding a *current*
  * member's key material keeps reading until that member is revoked.
  */
+/** Every context key is this long, everywhere: generation, import, rotation, and decoding. */
+private const val KEY_BYTES = 32
+
 class EpochKeys private constructor(byEpoch: Map<Int, ByteArray>) {
 
     // Keys are copied in and copied out: a caller mutating what it passed or what it read
@@ -54,6 +57,13 @@ class EpochKeys private constructor(byEpoch: Map<Int, ByteArray>) {
     init {
         require(this.byEpoch.isNotEmpty()) { "A context has at least one key" }
         require(this.byEpoch.keys.all { it >= 0 }) { "Epochs count up from zero" }
+        // Every context key is exactly 32 bytes (LEP-R13). Without this a short or empty key —
+        // from a truncated restore, a caller's placeholder, or a password someone decided to
+        // "just use here" — would be silently accepted, and HKDF would turn it into perfectly
+        // well-formed layer keys with none of the entropy the construction assumes.
+        require(this.byEpoch.values.all { it.size == KEY_BYTES }) {
+            "A context key is exactly $KEY_BYTES bytes"
+        }
     }
 
     /** The newest epoch, which is the one to seal under. */
@@ -133,7 +143,6 @@ class EpochKeys private constructor(byEpoch: Map<Int, ByteArray>) {
         private const val MAX_EPOCHS = 10_000
 
         private const val EPOCH_BYTES = 4
-        private const val KEY_BYTES = 32
 
         /**
          * Reads [serialise]. Returns null rather than throwing on anything malformed — and
