@@ -104,14 +104,15 @@ class MultiMemberTest {
     }
 
     @Test
-    fun `a member added by someone else is admitted, not treated as a stranger`() {
+    fun `a guest cannot add members to someone else's calendar`() {
         val owner = DeviceKeys.generate(provider)
         val code = PairingCode.generate(provider)
         val first = Inviter(provider, owner, code, negotiated = negotiation.first)
         val sarahKeys = DeviceKeys.generate(provider)
         pair(first, Joiner(provider, sarahKeys, code, negotiated = negotiation.second))
 
-        // Sarah, an ordinary member rather than the founder, adds Mum.
+        // Sarah is a guest on the owner's calendar. She may not bring anyone else into it:
+        // the calendar belongs to the device that founded it, and membership is its prerogative.
         val mumKeys = DeviceKeys.generate(provider)
         val grown = first.membershipLog()!!.append(
             provider, MembershipOp.ADD, mumKeys.identity,
@@ -119,11 +120,17 @@ class MultiMemberTest {
         )
 
         val verification = grown.verify(provider)
-        assertTrue(verification is MembershipVerification.Valid, "any active member may add: $verification")
+        assertTrue(verification is MembershipVerification.Invalid, "a guest must not be able to add: $verification")
         assertTrue(
-            mumKeys.identity.signingPublicKey.toHexString() in
-                (verification as MembershipVerification.Valid).activeMembers,
+            "Only the founding device may add members" in (verification as MembershipVerification.Invalid).reason,
+            verification.reason,
         )
+        // The owner adding Mum is the supported path, and it verifies.
+        val byOwner = first.membershipLog()!!.append(
+            provider, MembershipOp.ADD, mumKeys.identity,
+            wrappedKeys = ByteArray(8), signer = owner.signingKeyPair,
+        )
+        assertTrue(byOwner.verify(provider) is MembershipVerification.Valid)
     }
 
     // ── Propagating the log ───────────────────────────────────────────────────────────────────

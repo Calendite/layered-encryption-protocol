@@ -72,22 +72,27 @@ class MembershipForkAttackTest {
         val c = Calendar()
         // A (owner) revokes B on a short branch.
         val ownerBranch = c.base.revoke(c.malloryB.identity, c.owner)
-        // B forks before the revoke and pads with many *distinct* junk-device ADDs — each valid,
-        // so the branch verifies, and it is far longer than the owner's.
+        // B forks before the revoke and pads with many distinct junk-device ADDs, trying to
+        // out-grow the owner's branch. Length was never the defence — but now the padding is
+        // not even well-formed history: membership belongs to the founding device, so a guest's
+        // ADD is unauthorised and the whole branch fails verification.
         var bBranch = c.base
         repeat(20) { bBranch = bBranch.add(DeviceKeys.generate(provider).identity, c.malloryB) }
-        assertTrue(bBranch.isValid(), "distinct junk ADDs are individually valid")
+        assertFalse(bBranch.isValid(), "a guest cannot pad a branch with additions it may not make")
         assertTrue(bBranch.entries.size > ownerBranch.entries.size, "B's branch is longer")
 
-        val fromOwner = assertIs<Reconciliation.Forked>(ownerBranch.reconcile(provider, bBranch))
-        val fromB = assertIs<Reconciliation.Forked>(bBranch.reconcile(provider, ownerBranch))
+        // Length was never the defence, and now the race never happens: an unauthorised branch
+        // is refused from both sides rather than out-voted. B cannot bury its own revocation
+        // under padding it has no authority to create.
+        assertIs<Reconciliation.InvalidBranch>(ownerBranch.reconcile(provider, bBranch))
+        assertIs<Reconciliation.InvalidBranch>(bBranch.reconcile(provider, ownerBranch))
 
-        // Length does not save B: the branch carrying REVOKE(B) wins from both sides...
-        assertFalse(fromOwner.theirsWins, "the owner's revoke branch wins over B's longer padding")
-        assertTrue(fromB.theirsWins, "and B's side agrees the owner's branch wins")
-        // ...and either way, B is in the revoked set that a consumer must honour.
-        assertTrue(c.malloryB.identity.signingPublicKey.toHexString() in fromOwner.revokedMembers)
-        assertTrue(c.malloryB.identity.signingPublicKey.toHexString() in fromB.revokedMembers)
+        // The owner's branch stands, carrying the revocation a consumer must honour.
+        assertTrue(ownerBranch.isValid())
+        assertTrue(
+            c.malloryB.identity.signingPublicKey.toHexString() !in
+                (ownerBranch.verify(provider) as MembershipVerification.Valid).activeMembers,
+        )
     }
 
     @Test

@@ -287,7 +287,7 @@ class SuiteUpgradeTest {
         val third = DeviceKeys.generate(provider)
         val theirs = base.append(
             provider, MembershipOp.ADD, third.identity, wrappedKeys = null,
-            signer = member.signingKeyPair, resolver = resolver,
+            signer = founder.signingKeyPair, resolver = resolver,
         )
 
         val resolution = ours.resolveFork(provider, theirs, founder, suites = resolver)

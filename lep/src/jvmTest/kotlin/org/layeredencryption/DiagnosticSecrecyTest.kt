@@ -114,10 +114,11 @@ class DiagnosticSecrecyTest {
             .append(provider, MembershipOp.ADD, b.identity, null, a.signingKeyPair)
             .append(provider, MembershipOp.ADD, c.identity, null, a.signingKeyPair)
         val rotationKey = provider.randomBytes(32)
+        // Two divergent owner-signed branches: the shape a real fork takes now that membership
+        // is the founding device's prerogative.
         val honest = base.revoke(provider, b.identity, rotationKey, a.signingKeyPair)
-        val padded = base.revoke(provider, c.identity, provider.randomBytes(32), b.signingKeyPair)
-            .append(provider, MembershipOp.ADD, DeviceKeys.generate(provider).identity, null, b.signingKeyPair)
-        val resolved = assertIs<ForkResolution.Resolved>(honest.resolveFork(provider, padded, resolver = a))
+        val other = base.revoke(provider, c.identity, provider.randomBytes(32), a.signingKeyPair)
+        val resolved = assertIs<ForkResolution.Resolved>(honest.resolveFork(provider, other, resolver = a))
 
         // ── Envelopes: delivery, replay refusal, cross-context refusal ────────────────────
         val keys = EpochKeys.founding(masterKey)

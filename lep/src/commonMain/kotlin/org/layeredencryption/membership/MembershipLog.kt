@@ -879,6 +879,9 @@ class MembershipLog private constructor(
         }
         if (entry.signerPublicKey.toHexString() !in members) return "Signer is not an active member"
         val subject = entry.deviceIdentity.signingPublicKey.toHexString()
+        val signer = entry.signerPublicKey.toHexString()
+        val ownerHex = entriesSnapshot.first().deviceIdentity.signingPublicKey.toHexString()
+        val isOwner = signer == ownerHex
         when (entry.op) {
             // No-op transitions are rejected, not silently absorbed into the member set. A
             // re-ADD of an active member is the padding primitive LEP-03 exploits: a device
@@ -886,6 +889,12 @@ class MembershipLog private constructor(
             // branch carrying its revocation. Making the transition itself invalid means such a
             // branch never verifies, so it can never reach reconciliation.
             MembershipOp.ADD -> {
+                // A calendar belongs to the device that founded it, and membership is its
+                // prerogative alone (LEP-R3). Guests are participants, not co-owners: a person
+                // invited to this calendar cannot invite further people into it, and — the
+                // security consequence — a *compromised* guest device cannot mint attacker
+                // identities that would survive its own revocation.
+                if (!isOwner) return "Only the founding device may add members"
                 if (subject in members) return "Re-adding an active member"
                 // The cap is a verification rule, not advice (LEP-R4): a context that grew past
                 // the point where one rotation can wrap for everyone could not be revoked from,
@@ -900,6 +909,13 @@ class MembershipLog private constructor(
             // would hand the new key to precisely who the entry exists to exclude. Keyless
             // revocations stay legal: fork resolution batches its removals under one rotation.
             MembershipOp.REVOKE -> {
+                // The founder can only be removed by itself. Revocation stays open to members
+                // generally — it removes access rather than granting it, and a guest ejecting a
+                // stolen device promptly is worth more than the griefing it allows, which the
+                // owner can undo. But the founder is different now that it alone can admit
+                // members: letting a guest revoke it would leave the calendar permanently unable
+                // to admit anyone, a denial the ADD restriction would itself have created.
+                if (subject == ownerHex && subject != signer) return "Only the founding device may revoke itself"
                 if (subject !in members) return "Revoking a non-member"
                 if (entry.hasWrappedKeys) {
                     checkRecipients(entry, members - subject, "Revocation", activeSuite)?.let { return it }

@@ -51,7 +51,7 @@ class MembershipForkResolutionTest {
     // ── The padding attack, end to end ───────────────────────────────────────────────────────
 
     @Test
-    fun paddedBranchLosesItsAuthorAndItsPuppets() {
+    fun aPaddedBranchIsRejectedOutrightRatherThanRaced() {
         val a = DeviceKeys.generate(provider)
         val b = DeviceKeys.generate(provider)
         val c = DeviceKeys.generate(provider)
@@ -59,25 +59,20 @@ class MembershipForkResolutionTest {
         val p2 = DeviceKeys.generate(provider)
         val base = MembershipLog.found(provider, a.identity, a.signingKeyPair).add(b, a).add(c, a)
 
-        // A revokes B; B races it with a spurious revocation of C plus sock-puppet additions,
-        // winning the tie-break on length. Exactly the retest's example attack.
+        // The retest's example attack: A revokes B, and B races it with a spurious revocation of
+        // C plus sock-puppet additions to win the tie-break on length. Since only the founding
+        // device may add members, B's padding entries are not merely out-voted — they are
+        // unauthorised, so the branch never becomes a candidate at all.
         val honest = base.revokeBy(b, a)
         val padded = base.revokeBy(c, b).add(p1, b).add(p2, b)
 
-        val resolution = honest.resolveFork(provider, padded, resolver = a)
-        val resolved = assertIs<ForkResolution.Resolved>(resolution)
+        assertIs<MembershipVerification.Invalid>(padded.verify(provider), "a guest cannot sponsor anyone")
+        assertIs<Reconciliation.InvalidBranch>(honest.reconcile(provider, padded), "so it is never raced")
+        assertIs<ForkResolution.NotForked>(honest.resolveFork(provider, padded, resolver = a))
 
-        // B wins the branch race and still loses everything: itself, and both puppets.
-        assertEquals(setOf(hex(b), hex(p1), hex(p2)), resolved.revoked)
-        assertEquals(setOf(hex(a)), resolved.log.actives())
-        assertTrue(resolved.lostAdditions.isEmpty())
-
-        // The rotation excludes every condemned identity; the survivor reads the new key.
-        val key = assertNotNull(resolved.newMasterKey)
-        assertTrue(resolved.log.handsKeyTo(a, key))
-        for (outsider in listOf(b, c, p1, p2)) {
-            assertFalse(resolved.log.handsKeyTo(outsider, key), "an excluded device must not read the new key")
-        }
+        // The honest branch stands on its own, and the puppets were never members of anything.
+        assertEquals(setOf(hex(a), hex(c)), honest.actives())
+        for (puppet in listOf(p1, p2)) assertTrue(hex(puppet) !in honest.actives())
     }
 
     @Test
@@ -126,7 +121,7 @@ class MembershipForkResolutionTest {
     }
 
     @Test
-    fun taintIsTransitive() {
+    fun aPuppetChainCannotBeBuiltAtAll() {
         val a = DeviceKeys.generate(provider)
         val b = DeviceKeys.generate(provider)
         val b2 = DeviceKeys.generate(provider)
@@ -134,18 +129,15 @@ class MembershipForkResolutionTest {
         val c = DeviceKeys.generate(provider)
         val base = MembershipLog.found(provider, a.identity, a.signingKeyPair).add(b, a).add(c, a)
 
-        // B sponsors B2, who sponsors B3: a puppet chain. All of it falls with B.
+        // B sponsors B2, who sponsors B3. Fork resolution used to unwind this chain after the
+        // fact via transitive taint; membership authority now prevents the first link from
+        // existing, so a compromised guest has nothing to bequeath to its own revocation.
         val honest = base.revokeBy(b, a)
         val chained = base.revokeBy(c, b).add(b2, b).add(b3, b2)
 
-        val resolved = assertIs<ForkResolution.Resolved>(honest.resolveFork(provider, chained, resolver = a))
-
-        assertEquals(setOf(hex(b), hex(b2), hex(b3)), resolved.revoked)
-        assertEquals(setOf(hex(a)), resolved.log.actives())
-        val key = assertNotNull(resolved.newMasterKey)
-        for (outsider in listOf(b, b2, b3)) {
-            assertFalse(resolved.log.handsKeyTo(outsider, key))
-        }
+        assertIs<MembershipVerification.Invalid>(chained.verify(provider))
+        assertIs<ForkResolution.NotForked>(honest.resolveFork(provider, chained, resolver = a))
+        for (puppet in listOf(b2, b3)) assertTrue(hex(puppet) !in honest.actives())
     }
 
     // ── Losing-branch additions ──────────────────────────────────────────────────────────────
@@ -296,9 +288,12 @@ class MembershipForkResolutionTest {
         val c = DeviceKeys.generate(provider)
         val base = MembershipLog.found(provider, a.identity, a.signingKeyPair).add(b, a).add(c, a)
 
+        // Two divergent owner-signed branches — the only way a real fork arises now that
+        // membership is the founder's prerogative (a restored backup, or a compromised owner
+        // device deliberately splitting its own history).
         val honest = base.revokeBy(b, a)
-        val padded = base.revokeBy(c, b).add(DeviceKeys.generate(provider), b)
-        val resolved = assertIs<ForkResolution.Resolved>(honest.resolveFork(provider, padded, resolver = a))
+        val other = base.revokeBy(c, a)
+        val resolved = assertIs<ForkResolution.Resolved>(honest.resolveFork(provider, other, resolver = a))
 
         // The relay suppresses the final entry — the rotation — and forwards the rest.
         val truncated = MembershipLog.deserialise(
