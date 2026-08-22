@@ -55,6 +55,36 @@ object WrappedKeys {
     /** The one thing this construction wraps in this protocol: a 32-byte context master key. */
     const val CONTEXT_KEY_BYTES = 32
 
+    /**
+     * The exact serialised size of one recipient's copy under [suite], or an
+     * [IllegalArgumentException] if the suite declares sizes that cannot describe a real
+     * construction. Computed in [Long] and range-checked: a suite is data, and a hostile or
+     * buggy one must not be able to overflow a size calculation into a small positive number.
+     */
+    internal fun copyBytes(suite: ProtocolSuite): Int {
+        val memberIdHex = suite.signature.publicKeySize.toLong() * 2
+        val ciphertext = suite.kem.ciphertextSize.toLong()
+        val sealed = suite.aead.sealedSize(CONTEXT_KEY_BYTES).toLong()
+        require(memberIdHex > 0 && ciphertext > 0 && sealed > 0) {
+            "Suite ${suite.id.value} declares a non-positive field size"
+        }
+        val total = 3L * LENGTH_PREFIX + memberIdHex + ciphertext + sealed
+        require(total in 1..Int.MAX_VALUE.toLong()) { "Suite ${suite.id.value} copy size is out of range" }
+        return total.toInt()
+    }
+
+    /**
+     * How many recipients one wrapped-keys blob can hold under [suite] before it exceeds
+     * [ProtocolLimits.MAX_WRAPPED_KEYS_BYTES] — the single source of truth shared by the
+     * encoder's preflight and the decoder's bound, so the two can never disagree about what
+     * fits (LEP-R4). Membership is separately capped at [ProtocolLimits.MAX_ACTIVE_MEMBERS],
+     * which must stay below this for every supported suite.
+     */
+    fun maxRecipients(suite: ProtocolSuite, budget: Int = ProtocolLimits.MAX_WRAPPED_KEYS_BYTES): Int {
+        require(budget > 0) { "The wrapped-keys budget must be positive" }
+        return budget / copyBytes(suite)
+    }
+
     /** Seals [secret] once per recipient under [suite]. Recipients are identified by signing-key hex. */
     fun wrapFor(
         provider: CryptoProvider,
@@ -66,6 +96,13 @@ object WrappedKeys {
         require(secret.size == CONTEXT_KEY_BYTES) { "WrappedKeys wraps the $CONTEXT_KEY_BYTES-byte context key" }
         val ids = recipients.map { it.signingPublicKey.toHexString() }
         require(ids.toSet().size == ids.size) { "Duplicate recipient in wrap list" }
+        // Preflight before the first encapsulation (LEP-R4): an output this parser would refuse
+        // is worth nothing, and discovering that after N post-quantum KEM operations wastes the
+        // work and hands an attacker a compute amplifier.
+        val capacity = maxRecipients(suite)
+        require(recipients.size <= capacity) {
+            "A suite-${suite.id.value} wrapped-keys blob holds at most $capacity recipients, was ${recipients.size}"
+        }
         val writer = FrameWriter()
         for (recipient in recipients) {
             val encapsulation = suite.kem.encapsulate(provider, recipient.xWingPublicKey)
@@ -74,7 +111,13 @@ object WrappedKeys {
             writer.putBytes(encapsulation.ciphertext)
             writer.putBytes(suite.aead.seal(provider, wrapKey, secret, aad = recipient.serialise(), namespace = namespace))
         }
-        return writer.toByteArray()
+        return writer.toByteArray().also {
+            // The preflight above should make this unreachable; it is asserted anyway because a
+            // blob the decoder refuses is an unrecoverable context, not a recoverable error.
+            check(it.size <= ProtocolLimits.MAX_WRAPPED_KEYS_BYTES) {
+                "Wrapped-keys blob of ${it.size} bytes exceeds its budget despite preflight"
+            }
+        }
     }
 
     /**
@@ -130,9 +173,9 @@ object WrappedKeys {
         val memberIdHexLength = suite.signature.publicKeySize * 2
         val ciphertextSize = suite.kem.ciphertextSize
         val sealedBytes = suite.aead.sealedSize(CONTEXT_KEY_BYTES)
-        val copyBytes = LENGTH_PREFIX + memberIdHexLength + LENGTH_PREFIX + ciphertextSize + LENGTH_PREFIX + sealedBytes
-        // Derived from the byte budget, so the count limit and the total limit cannot disagree.
-        val maxRecipients = ProtocolLimits.MAX_WRAPPED_KEYS_BYTES / copyBytes
+        // Derived from the same byte budget as the encoder's preflight, so the count limit and
+        // the total limit cannot disagree.
+        val maxRecipients = maxRecipients(suite)
         val reader = FrameReader(blob)
         val copies = mutableListOf<Copy>()
         val seen = mutableSetOf<String>()

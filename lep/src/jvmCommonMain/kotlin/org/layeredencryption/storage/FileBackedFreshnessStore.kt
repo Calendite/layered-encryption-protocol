@@ -87,8 +87,10 @@ class FileBackedFreshnessStore private constructor(
             true
         }
 
+    // The shared comparison, so this store and the in-memory reference can never disagree about
+    // what "newer" means: lexicographic by (epoch, seq), negatives refused. See LEP-R1.
     private fun admissible(current: Watermark?, seq: Int, epoch: Int): Boolean =
-        current == null || (seq > current.seq && epoch >= current.epoch)
+        org.layeredencryption.envelope.isFresherThan(current?.seq, current?.epoch, seq, epoch)
 
     private fun parse(bytes: ByteArray?): LinkedHashMap<Pair<String, String>, Watermark> {
         val lanes = LinkedHashMap<Pair<String, String>, Watermark>()
@@ -100,6 +102,10 @@ class FileBackedFreshnessStore private constructor(
                 val lane = reader.readBytes(MAX_FIELD).decodeToString()
                 val seq = u32FromBytes(reader.readBytes(4))
                 val epoch = u32FromBytes(reader.readBytes(4))
+                // A stored watermark is authenticated, so this is a local-corruption guard rather
+                // than an attack path — but a negative watermark would make every later envelope
+                // look fresh, which is exactly the state a freshness store exists to prevent.
+                require(seq >= 0 && epoch >= 0) { "Watermark values count up from zero" }
                 lanes[context to lane] = Watermark(seq, epoch)
             }
             require(!reader.hasRemaining()) { "Trailing bytes after the watermarks" }

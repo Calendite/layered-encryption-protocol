@@ -17,12 +17,23 @@ class ReplayException(message: String) : Exception(message)
  * this: a malicious relay can replay an old valid envelope, deliver a stale one late, or suppress
  * newer ones, all without touching a byte.
  *
- * The acceptance rule per lane: sequence numbers strictly increase (gaps are allowed — whether a
- * gap means suppression or not-yet-delivered is knowledge only the consumer has), and the epoch
- * never decreases. Epoch monotonicity is a real defence, not bookkeeping: [LaneEnvelope.open]
- * accepts any epoch this device holds a key for, so an attacker holding one *retired* epoch key
- * could otherwise forge fresh-looking ops for a lane forever; monotonicity ends that the moment
- * any newer-epoch op has been accepted on the lane.
+ * The acceptance rule per lane is **lexicographic by `(epoch, seq)`**: a higher epoch is always
+ * newer whatever its sequence, and within one epoch sequence numbers strictly increase (gaps are
+ * allowed — whether a gap means suppression or not-yet-delivered is knowledge only the consumer
+ * has). Epoch monotonicity is a real defence, not bookkeeping: opening accepts any epoch this
+ * device holds a key for, so an attacker holding one *retired* epoch key could otherwise forge
+ * fresh-looking ops for a lane forever; monotonicity ends that the moment any newer-epoch op has
+ * been accepted on the lane.
+ *
+ * ### Why epoch is compared first (LEP-R1)
+ * The rule used to be `seq > current.seq && epoch >= current.epoch` — sequence-first, with epoch
+ * only as a floor. That let a retired epoch key poison a lane permanently: a revoked member who
+ * kept the epoch-N key could seal an envelope naming *any* lane with `seq = Int.MAX_VALUE`, and
+ * because the receiver still holds epoch N for history the AEAD tag verified. The watermark moved
+ * to `MAX_VALUE`, and no legitimate epoch-N+1 envelope could ever exceed it — the lane was dead
+ * forever. Ordering by epoch first fixes it structurally: the first genuine envelope of the new
+ * epoch is newer than anything from the old one, so a retired key can delay a lane at most until
+ * the next rotation lands, and a sequence may restart at any value in a new epoch.
  *
  * ### Production contract
  * The production implementation on JVM/Android is
@@ -50,10 +61,10 @@ interface FreshnessStore {
     fun wouldAccept(contextId: String, lane: String, seq: Int, epoch: Int): Boolean
 
     /**
-     * Atomically checks and records: accepts iff `seq` is strictly greater than the lane's
-     * highest accepted sequence and `epoch` is not below its highest accepted epoch. Exactly one
-     * of two racing calls with the same `seq` wins. Prefer [deliverIfFresh] when the acceptance
-     * must be tied to the application taking custody of a plaintext.
+     * Atomically checks and records: accepts iff `(epoch, seq)` is lexicographically greater than
+     * the lane's watermark. Exactly one of two racing calls with the same `(epoch, seq)` wins.
+     * Prefer [deliverIfFresh] when the acceptance must be tied to the application taking custody
+     * of a plaintext.
      */
     fun accept(contextId: String, lane: String, seq: Int, epoch: Int): Boolean
 
@@ -105,5 +116,21 @@ class InMemoryFreshnessStore : FreshnessStore {
     }
 
     private fun admissible(current: Watermark?, seq: Int, epoch: Int): Boolean =
-        current == null || (seq > current.seq && epoch >= current.epoch)
+        isFresherThan(current?.seq, current?.epoch, seq, epoch)
+}
+
+/**
+ * The one freshness comparison, shared by every [FreshnessStore] implementation so two stores
+ * can never disagree about what "newer" means: lexicographic by `(epoch, seq)`, with negative
+ * values refused outright.
+ *
+ * Negative inputs are a caller or transport bug, never a legitimate envelope — the envelope
+ * decoder only produces canonical non-negative decimals — but a store is a public API that can
+ * be driven directly, and a negative watermark would make every later value look fresh.
+ */
+internal fun isFresherThan(currentSeq: Int?, currentEpoch: Int?, seq: Int, epoch: Int): Boolean {
+    require(seq >= 0) { "Sequence numbers count up from zero, was $seq" }
+    require(epoch >= 0) { "Epochs count up from zero, was $epoch" }
+    if (currentSeq == null || currentEpoch == null) return true
+    return epoch > currentEpoch || (epoch == currentEpoch && seq > currentSeq)
 }

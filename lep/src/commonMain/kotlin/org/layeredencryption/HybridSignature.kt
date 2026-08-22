@@ -87,6 +87,14 @@ object HybridSignature {
      * A malformed signature or public key is a rejection rather than an exception: callers treat a
      * `false` here as "reject this identity", and a length mismatch is just one more way for a
      * signature to be wrong.
+     *
+     * The size checks below do not make a key *valid*. A correctly-sized Ed25519 point that is
+     * not on the curve, or a malformed ML-DSA key, makes a provider raise rather than return
+     * false — and those bytes are attacker-chosen wherever an identity arrives from a relay (a
+     * membership log, a pairing frame). Letting that escape would turn "this identity does not
+     * verify" into an exception thrown through the caller's sync handler, and would break the
+     * contract every caller above depends on: `MembershipLog.verify` *returns* Invalid, it does
+     * not throw. So a provider failure is a rejection too.
      */
     fun verify(
         provider: CryptoProvider,
@@ -96,13 +104,15 @@ object HybridSignature {
     ): Boolean {
         if (publicKey.size != PUBLIC_KEY_SIZE) return false
         if (signature.size != SIGNATURE_SIZE) return false
-        val classicalOk = provider.ed25519Verify(
-            classicalPublic(publicKey), message, signature.copyOfRange(0, ED25519_SIGNATURE_SIZE),
-        )
-        val postQuantumOk = provider.mlDsa65Verify(
-            postQuantumPublic(publicKey), message, signature.copyOfRange(ED25519_SIGNATURE_SIZE, signature.size),
-        )
-        return classicalOk && postQuantumOk
+        return runCatching {
+            val classicalOk = provider.ed25519Verify(
+                classicalPublic(publicKey), message, signature.copyOfRange(0, ED25519_SIGNATURE_SIZE),
+            )
+            val postQuantumOk = provider.mlDsa65Verify(
+                postQuantumPublic(publicKey), message, signature.copyOfRange(ED25519_SIGNATURE_SIZE, signature.size),
+            )
+            classicalOk && postQuantumOk
+        }.getOrDefault(false)
     }
 
     /** The Ed25519 half of a hybrid public key. */

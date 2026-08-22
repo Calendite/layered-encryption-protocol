@@ -250,7 +250,22 @@ sealed interface MembershipVerification {
  * X25519 identity key is caught. Clients [verify] the whole chain before honouring any membership.
  * The log is immutable — mutating operations return a new [MembershipLog].
  */
-class MembershipLog private constructor(entries: List<MembershipEntry>) {
+class MembershipLog private constructor(
+    entries: List<MembershipEntry>,
+    /**
+     * Whether this instance descends from material this library has already established as
+     * authentic — a genesis it founded, or an append/rotation onto a log that was itself
+     * trusted or freshly verified (LEP-R2).
+     *
+     * This is a one-bit provenance marker, not a security claim about the bytes: a log that
+     * arrives from a relay or a restored backup is untrusted no matter how well-formed it is,
+     * and every mutation that wraps a secret for it must verify first. It exists because a
+     * blanket "verify before mutating" is wrong for one legitimate internal case — fork
+     * resolution appends a batch of keyless revocations that is *deliberately* invalid until
+     * its terminating rotation lands, so the rotation cannot demand a valid predecessor.
+     */
+    private val trustedProvenance: Boolean,
+) {
 
     // A structural snapshot: Kotlin's read-only List is an interface, not a guarantee, so the
     // supplied backing collection is copied on construction and never handed back out — a caller
@@ -282,6 +297,8 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             provider, head(provider, namespace), op, deviceIdentity, wrappedKeys, signer, namespace,
             suite = currentEraSuite(resolver),
         ),
+        // An append onto trusted material stays trusted; onto untrusted material it does not.
+        trustedProvenance = trustedProvenance,
     )
 
     /**
@@ -290,6 +307,46 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
      * Read from the entry that added each one, which is the only place a full identity appears. It
      * is needed by name rather than by key hex because rotating the context key means encapsulating
      * to each remaining member's KEM key, and a hex id is not something you can encrypt to.
+     */
+    /**
+     * Verifies this log and returns the identities a key-wrapping mutation must address, or
+     * throws before any cryptographic work happens (LEP-R2).
+     *
+     * Deserialising a log proves it is *well-formed*, not that it is *authentic*: a relay or a
+     * restored backup can hand over a structurally perfect log carrying an unauthorised `ADD`
+     * that names an attacker's KEM key. [activeIdentities] would then include that identity, and
+     * a rotation would encapsulate the fresh context key straight to the attacker. Ordering the
+     * verification correctly cannot be left to every caller remembering a comment, so every
+     * mutation that wraps a secret starts here.
+     *
+     * The cost is a full chain re-verification per mutation. That is deliberate: rotations and
+     * revocations are rare, human-initiated events that already perform one KEM encapsulation
+     * per member, and a wrong answer here leaks the context key.
+     */
+    private fun verifiedIdentities(
+        provider: CryptoProvider,
+        namespace: ProtocolNamespace,
+        resolver: SuiteResolver,
+    ): List<DeviceIdentity> {
+        if (trustedProvenance) return activeIdentities(provider)
+        val verification = verify(provider, namespace, resolver)
+        if (verification !is MembershipVerification.Valid) {
+            throw IllegalArgumentException(
+                "Refusing to wrap a context key for an unverified membership log: $verification",
+            )
+        }
+        val active = verification.activeMembers
+        return activeIdentities(provider).filter { it.signingPublicKey.toHexString() in active }
+    }
+
+    /**
+     * The identity of every currently active member, **read from parsed entries without
+     * verifying them**.
+     *
+     * Safe only on a log this device has already verified. Anything that wraps, releases, or
+     * derives a live secret must go through the verification gate instead — see
+     * [verifiedIdentities]. Displaying these to a user, or trusting them for authorisation, on a
+     * log that arrived from a relay is a mistake.
      */
     fun activeIdentities(provider: CryptoProvider): List<DeviceIdentity> {
         val active = linkedMapOf<String, DeviceIdentity>()
@@ -325,7 +382,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         resolver: SuiteResolver = SuiteRegistry,
     ): MembershipLog {
         val removedKey = removed.signingPublicKey.toHexString()
-        val remaining = activeIdentities(provider).filterNot {
+        val remaining = verifiedIdentities(provider, namespace, resolver).filterNot {
             it.signingPublicKey.toHexString() == removedKey
         }
         // Only degenerate if it empties the calendar, which means revoking yourself as the sole
@@ -362,7 +419,9 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         provider = provider,
         op = MembershipOp.ROTATE,
         deviceIdentity = signer.identity,
-        wrappedKeys = WrappedKeys.wrapFor(provider, currentEraSuite(resolver), activeIdentities(provider), newMasterKey, namespace),
+        wrappedKeys = WrappedKeys.wrapFor(
+            provider, currentEraSuite(resolver), verifiedIdentities(provider, namespace, resolver), newMasterKey, namespace,
+        ),
         signer = signer.signingKeyPair,
         namespace = namespace,
         resolver = resolver,
@@ -401,7 +460,9 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             oldSuite = current.id,
             newSuite = newSuite.id,
             transitionEpoch = epochCount() + 1,
-            wrappedKeys = WrappedKeys.wrapFor(provider, newSuite, activeIdentities(provider), newMasterKey, namespace),
+            wrappedKeys = WrappedKeys.wrapFor(
+                provider, newSuite, verifiedIdentities(provider, namespace, resolver), newMasterKey, namespace,
+            ),
         )
         return append(
             provider = provider,
@@ -544,7 +605,10 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             "fork: shared prefix ${outcome.sharedPrefix}, ${entriesSnapshot.size - outcome.sharedPrefix} ours vs " +
                 "${other.entriesSnapshot.size - outcome.sharedPrefix} theirs, union of ${outcome.revokedMembers.size} revocation(s)"
         }
-        val winner = if (outcome.theirsWins) other else this
+        // reconcile() verified BOTH branches under these exact parameters before returning
+        // Forked, so the winner is authentic material and the chain built onto it below —
+        // including its deliberately-invalid keyless-revocation batch — is trusted.
+        val winner = (if (outcome.theirsWins) other else this).asTrusted()
         val loser = if (outcome.theirsWins) this else other
 
         // The union, closed over sponsorship: a winning-tail ADD signed by anyone already
@@ -670,6 +734,14 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         val theirHead = other.entriesSnapshot.last().hash(provider, namespace).toHexString()
         return theirHead < ourHead
     }
+
+    /**
+     * This log, marked as authentic. Callable only from inside this class and only immediately
+     * after a successful verification under the same provider, namespace, and resolver — the
+     * marker records a check that already happened, it never asserts one.
+     */
+    private fun asTrusted(): MembershipLog =
+        if (trustedProvenance) this else MembershipLog(entriesSnapshot, trustedProvenance = true)
 
     /** The entries this log has beyond the first [shared] of them. */
     fun entriesAfter(shared: Int): List<MembershipEntry> = entriesSnapshot.drop(shared)
@@ -813,7 +885,15 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             // about to be revoked forks and appends signed ADD(self) entries to out-grow the
             // branch carrying its revocation. Making the transition itself invalid means such a
             // branch never verifies, so it can never reach reconciliation.
-            MembershipOp.ADD -> if (subject in members) return "Re-adding an active member"
+            MembershipOp.ADD -> {
+                if (subject in members) return "Re-adding an active member"
+                // The cap is a verification rule, not advice (LEP-R4): a context that grew past
+                // the point where one rotation can wrap for everyone could not be revoked from,
+                // so the growth itself is what must be refused.
+                if (members.size >= ProtocolLimits.MAX_ACTIVE_MEMBERS) {
+                    return "A context holds at most ${ProtocolLimits.MAX_ACTIVE_MEMBERS} active members"
+                }
+            }
             // A keyed revocation must rotate to exactly the survivors: omitting an active member
             // would leave them a member the log vouches for who can never read another epoch — a
             // silent membership/key partition — and including the revoked subject (or a stranger)
@@ -965,6 +1045,8 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): MembershipLog = MembershipLog(
             listOf(signEntry(provider, MembershipEntry.GENESIS_PREVIOUS_HASH, MembershipOp.ADD, founder, wrappedKeys, signer, namespace)),
+            // Founded here, from this device's own keys: trusted by construction.
+            trustedProvenance = true,
         )
 
         /** Far beyond any real device list; the bound is what stops 16 MB of confetti becoming 16 MB of list. */
@@ -995,7 +1077,9 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
                     era = resolver.require(payload.newSuite)
                 }
             }
-            return MembershipLog(entries)
+            // Parsed, not authenticated: a structurally perfect log can still carry an
+            // unauthorised ADD naming an attacker's KEM key.
+            return MembershipLog(entries, trustedProvenance = false)
         }
 
         private fun signEntry(
