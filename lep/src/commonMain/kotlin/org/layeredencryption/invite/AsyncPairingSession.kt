@@ -17,7 +17,9 @@ import org.layeredencryption.pairing.constantTimeEquals
 import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.ProtocolLock
 import org.layeredencryption.ProtocolNamespace
-import org.layeredencryption.suite.Suite1
+import org.layeredencryption.suite.ProtocolSuite
+import org.layeredencryption.suite.SuiteRegistry
+import org.layeredencryption.suite.SuiteResolver
 import org.layeredencryption.toHexString
 
 /** Invite lifecycle (Async_Invites_Spec.md §2.1). */
@@ -121,6 +123,8 @@ class AsyncInviter private constructor(
     val expiryEpochSeconds: Long,
     private val store: InviteStore?,
     private val namespace: ProtocolNamespace,
+    private val suite: ProtocolSuite,
+    private val resolver: SuiteResolver,
 ) {
     var state: AsyncInviteState = AsyncInviteState.PENDING
         private set
@@ -160,7 +164,7 @@ class AsyncInviter private constructor(
         if (nowEpochSeconds > expiryEpochSeconds) return expire()
 
         // Exact sizes before any cryptography: malformed responses cost nothing.
-        if (response.kemCiphertext.size != XWing.CIPHERTEXT_SIZE) return ResponseOutcome.Invalid
+        if (response.kemCiphertext.size != suite.kem.ciphertextSize) return ResponseOutcome.Invalid
         if (response.linkProofMac.size != MAC_SIZE) return ResponseOutcome.Invalid
         if (response.joinerMac.size != MAC_SIZE) return ResponseOutcome.Invalid
 
@@ -219,7 +223,13 @@ class AsyncInviter private constructor(
      * collector.
      */
     private fun evaluateResponse(response: AsyncJoinerResponse): Evaluated? {
-        if (!response.deviceIdentityS.verifyBinding(provider, namespace)) {
+        // The invite's suite is pinned by the out-of-band link; a joiner from another suite is
+        // not a valid respondent, however internally consistent its identity.
+        if (response.deviceIdentityS.suiteId != suite.id) {
+            Diagnostics.warning(LepTag.INVITE) { "response rejected: joiner identity suite does not match the invite" }
+            return null
+        }
+        if (!response.deviceIdentityS.verifyBinding(provider, namespace, resolver)) {
             Diagnostics.warning(LepTag.INVITE) { "response rejected: joiner identity binding does not verify" }
             return null
         }
@@ -231,8 +241,8 @@ class AsyncInviter private constructor(
         var macKey: ByteArray? = null
         var asyncKeyTransferred = false
         try {
-            sharedSecret = Suite1.kem.decapsulate(provider, inviteXWing.privateKey, response.kemCiphertext)
-            x25519Secret = Suite1.kem.x25519SecretComponent(provider, inviteXWing.privateKey)
+            sharedSecret = suite.kem.decapsulate(provider, inviteXWing.privateKey, response.kemCiphertext)
+            x25519Secret = suite.kem.x25519SecretComponent(provider, inviteXWing.privateKey)
             dh1 = AsyncHandshake.contributoryDh(provider, x25519Secret, response.deviceIdentityS.x25519IdentityPublicKey)
             val transcript = AsyncHandshake.transcript(
                 ridAsync, expiryEpochSeconds, inviteXWing.publicKey, device.identity, response.kemCiphertext, response.deviceIdentityS, namespace,
@@ -273,9 +283,9 @@ class AsyncInviter private constructor(
         } finally {
             macKey.fill(0)
         }
-        val wrappedMasterKey = Suite1.aead.seal(provider, claim.asyncKey, masterKey, aad = claim.joiner.serialise(), namespace = namespace)
+        val wrappedMasterKey = suite.aead.seal(provider, claim.asyncKey, masterKey, aad = claim.joiner.serialise(), namespace = namespace)
         val log = MembershipLog.found(provider, device.identity, device.signingKeyPair, namespace = namespace)
-            .append(provider, MembershipOp.ADD, claim.joiner, wrappedMasterKey, signer = device.signingKeyPair, namespace = namespace)
+            .append(provider, MembershipOp.ADD, claim.joiner, wrappedMasterKey, signer = device.signingKeyPair, namespace = namespace, resolver = resolver)
 
         transitionTo(AsyncInviteState.APPROVED)
         Diagnostics.debug(LepTag.INVITE) { "invite approved: master key released with a founding membership log" }
@@ -372,6 +382,7 @@ class AsyncInviter private constructor(
         masterKey = masterKey,
         expiryEpochSeconds = expiryEpochSeconds,
         state = state,
+        suiteId = suite.id,
     )
 
     companion object {
@@ -390,18 +401,22 @@ class AsyncInviter private constructor(
             expiryEpochSeconds: Long,
             store: InviteStore? = null,
             namespace: ProtocolNamespace = ProtocolNamespace.Default,
+            resolver: SuiteResolver = SuiteRegistry,
         ): AsyncInviter {
             require(expiryEpochSeconds > nowEpochSeconds) { "Invite expiry must be in the future" }
             require(expiryEpochSeconds - nowEpochSeconds <= MAX_LIFETIME_SECONDS) {
                 "Invite lifetime must be at most $MAX_LIFETIME_SECONDS seconds"
             }
+            // The invite runs under the inviter identity's own suite: the link carries it out of
+            // band, the bundle is signed under it, and every ceremony operation routes through it.
+            val suite = resolver.require(device.identity.suiteId)
             val secret = provider.randomBytes(InviteLink.SECRET_SIZE)
             val ridAsync = AsyncRendezvous.id(provider, secret, namespace)
-            val inviteXWing = Suite1.kem.generateKeyPair(provider)
+            val inviteXWing = suite.kem.generateKeyPair(provider)
             val masterKey = provider.randomBytes(MASTER_KEY_SIZE)
-            val bundle = InviteBundle.build(provider, inviteXWing.publicKey, device.identity, expiryEpochSeconds, ridAsync, device.signingKeyPair, namespace)
+            val bundle = InviteBundle.build(provider, inviteXWing.publicKey, device, expiryEpochSeconds, ridAsync, namespace, resolver)
             val link = InviteLink.create(provider, secret, device.identity)
-            val inviter = AsyncInviter(provider, device, secret, ridAsync, inviteXWing, masterKey, bundle, link, expiryEpochSeconds, store, namespace)
+            val inviter = AsyncInviter(provider, device, secret, ridAsync, inviteXWing, masterKey, bundle, link, expiryEpochSeconds, store, namespace, suite, resolver)
             store?.put(inviter.toPending())
             return inviter
         }
@@ -438,6 +453,7 @@ class AsyncInviter private constructor(
             nowEpochSeconds: Long,
             store: InviteStore? = null,
             namespace: ProtocolNamespace = ProtocolNamespace.Default,
+            resolver: SuiteResolver = SuiteRegistry,
         ): AsyncInviter {
             if (pending.state != AsyncInviteState.PENDING) {
                 throw PairingException("Only PENDING invites are resumable, was ${pending.state}")
@@ -446,14 +462,18 @@ class AsyncInviter private constructor(
                 store?.remove(pending.ridAsyncHex)
                 throw PairingException("Invite expired while stored")
             }
+            if (pending.suiteId != device.identity.suiteId) {
+                throw PairingException("Stored invite is suite ${pending.suiteId.value}; this identity is ${device.identity.suiteId.value}")
+            }
+            val suite = resolver.require(pending.suiteId)
             val bundle = InviteBundle.build(
-                provider, pending.inviteXWingPublicKey, device.identity, pending.expiryEpochSeconds, pending.ridAsync, device.signingKeyPair, namespace,
+                provider, pending.inviteXWingPublicKey, device, pending.expiryEpochSeconds, pending.ridAsync, namespace, resolver,
             )
             val link = InviteLink.create(provider, pending.secret, device.identity)
             return AsyncInviter(
                 provider, device, pending.secret, pending.ridAsync,
                 KeyPair(publicKey = pending.inviteXWingPublicKey, privateKey = pending.inviteXWingPrivateKey),
-                pending.masterKey, bundle, link, pending.expiryEpochSeconds, store, namespace,
+                pending.masterKey, bundle, link, pending.expiryEpochSeconds, store, namespace, suite, resolver,
             )
         }
     }
@@ -471,6 +491,7 @@ class AsyncJoiner(
     private val device: DeviceKeys,
     /** Domain-separates every derivation (LEP-10); must match the inviter's. */
     private val namespace: ProtocolNamespace = ProtocolNamespace.Default,
+    private val resolver: SuiteResolver = SuiteRegistry,
 ) {
     private var context: Context? = null
     private var recoveredMasterKey: ByteArray? = null
@@ -478,22 +499,33 @@ class AsyncJoiner(
     var shortAuthString: String? = null
         private set
 
-    private class Context(val asyncKey: ByteArray, val expectedInviterMac: ByteArray)
+    private class Context(val asyncKey: ByteArray, val expectedInviterMac: ByteArray, val suite: ProtocolSuite)
 
     /** Verifies the bundle (§2.7) and returns the response proving link possession. */
     fun onBundle(link: InviteLink, bundle: InviteBundle, nowEpochSeconds: Long): AsyncJoinerResponse {
         val ridAsync = AsyncRendezvous.id(provider, link.secret, namespace)
+
+        // The downgrade guard: the link's suite travelled out of band, so a relay serving a
+        // bundle under any other suite — however validly signed — is serving the wrong invite.
+        if (bundle.suiteId != link.suiteId) {
+            Diagnostics.warning(LepTag.INVITE) { "bundle rejected: suite does not match the link — a downgraded or swapped bundle" }
+            throw PairingException("Bundle suite does not match the link")
+        }
+        if (device.identity.suiteId != bundle.suiteId) {
+            throw PairingException("This device's identity is suite ${device.identity.suiteId.value}; the invite is ${bundle.suiteId.value}")
+        }
+        val suite = resolver.require(bundle.suiteId)
 
         // §2.7 step 2 — anti-directory: a relay that swapped the bundle fails here.
         if (!InviteLink.fingerprintOf(provider, bundle.deviceIdentityA).contentEquals(link.fingerprint)) {
             Diagnostics.warning(LepTag.INVITE) { "bundle rejected: fingerprint does not match the link — a swapped bundle" }
             throw PairingException("Bundle fingerprint does not match the link")
         }
-        if (!bundle.deviceIdentityA.verifyBinding(provider, namespace)) {
+        if (!bundle.deviceIdentityA.verifyBinding(provider, namespace, resolver)) {
             Diagnostics.warning(LepTag.INVITE) { "bundle rejected: inviter identity binding does not verify" }
             throw PairingException("Bundle device-identity binding is invalid")
         }
-        if (!bundle.verifySignature(provider, ridAsync, namespace)) {
+        if (!bundle.verifySignature(provider, ridAsync, namespace, resolver)) {
             Diagnostics.warning(LepTag.INVITE) { "bundle rejected: signature does not verify" }
             throw PairingException("Bundle signature is invalid")
         }
@@ -502,14 +534,14 @@ class AsyncJoiner(
             throw PairingException("Bundle has expired")
         }
 
-        val encapsulation = Suite1.kem.encapsulate(provider, bundle.inviteXWingPublicKey)
+        val encapsulation = suite.kem.encapsulate(provider, bundle.inviteXWingPublicKey)
         var dh1: ByteArray? = null
         var asyncKey: ByteArray? = null
         var macKey: ByteArray? = null
         var asyncKeyTransferred = false
         try {
             dh1 = AsyncHandshake.contributoryDh(
-                provider, device.x25519IdentityPrivateKey, Suite1.kem.x25519PublicComponent(bundle.inviteXWingPublicKey),
+                provider, device.x25519IdentityPrivateKey, suite.kem.x25519PublicComponent(bundle.inviteXWingPublicKey),
             )
             val transcript = AsyncHandshake.transcript(
                 ridAsync, bundle.expiryEpochSeconds, bundle.inviteXWingPublicKey, bundle.deviceIdentityA, encapsulation.ciphertext, device.identity, namespace,
@@ -521,6 +553,7 @@ class AsyncJoiner(
             context = Context(
                 asyncKey = asyncKey,
                 expectedInviterMac = Handshake.mac(provider, macKey, transcript, PairingRole.INVITER),
+                suite = suite,
             )
             asyncKeyTransferred = true
             return AsyncJoinerResponse(
@@ -573,8 +606,8 @@ class AsyncJoiner(
     }
 
     private fun unwrapMasterKey(context: Context, delivery: AsyncDelivery): ByteArray {
-        val log = MembershipLog.deserialise(delivery.serialisedMembershipLog)
-        val verification = log.verify(provider, namespace)
+        val log = MembershipLog.deserialise(delivery.serialisedMembershipLog, resolver)
+        val verification = log.verify(provider, namespace, resolver)
         if (verification !is MembershipVerification.Valid) throw PairingException("Membership log failed verification: $verification")
 
         val ownKey = device.identity.signingPublicKey
@@ -582,7 +615,7 @@ class AsyncJoiner(
 
         val entry = log.addEntryFor(ownKey) ?: throw PairingException("No ADD entry for this device")
         val wrapped = entry.wrappedKeys ?: throw PairingException("No wrapped keys for this device")
-        return Suite1.aead.open(provider, context.asyncKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
+        return context.suite.aead.open(provider, context.asyncKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
     }
 
     /** The recovered context master key, as a defensive copy. */

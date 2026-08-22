@@ -1,6 +1,7 @@
 package org.layeredencryption
 
 import org.layeredencryption.invite.InviteLink
+import org.layeredencryption.suite.SuiteId
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -12,33 +13,34 @@ class InviteLinkTest {
     fun link_roundTripsThroughFragment() {
         val secret = ByteArray(32) { (it + 1).toByte() }
         val fingerprint = ByteArray(16) { (it * 3).toByte() }
-        val fragment = InviteLink(secret, fingerprint).fragment()
+        val fragment = InviteLink(secret, fingerprint, SuiteId(1u)).fragment()
 
         val parsed = InviteLink.parse(fragment) ?: error("should parse")
         assertContentEquals(secret, parsed.secret)
         assertContentEquals(fingerprint, parsed.fingerprint)
+        assertContentEquals(byteArrayOf(0, 1), parsed.suiteId.toWireBytes())
     }
 
     @Test
     fun link_canonicalExampleIsStable() {
         // 32 + 16 zero bytes → all-'A' base64url; 43-char secret, 22-char fingerprint.
-        val fragment = InviteLink(ByteArray(32), ByteArray(16)).fragment()
-        assertEquals("A2.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA", fragment)
+        val fragment = InviteLink(ByteArray(32), ByteArray(16), SuiteId(1u)).fragment()
+        assertEquals("A3.1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA", fragment)
         assertEquals(
-            "https://calendite.com/join#A2.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA",
-            InviteLink(ByteArray(32), ByteArray(16)).url(),
+            "https://calendite.com/join#A3.1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA",
+            InviteLink(ByteArray(32), ByteArray(16), SuiteId(1u)).url(),
         )
     }
 
     @Test
     fun link_parsesFromAFullUrl() {
-        val url = InviteLink(ByteArray(32) { it.toByte() }, ByteArray(16) { it.toByte() }).url()
+        val url = InviteLink(ByteArray(32) { it.toByte() }, ByteArray(16) { it.toByte() }, SuiteId(1u)).url()
         assertContentEquals(ByteArray(32) { it.toByte() }, InviteLink.parseUrl(url)?.secret)
     }
 
     @Test
     fun link_urlParsingRequiresTheCanonicalOrigin() {
-        val fragment = InviteLink(ByteArray(32), ByteArray(16)).fragment()
+        val fragment = InviteLink(ByteArray(32), ByteArray(16), SuiteId(1u)).fragment()
         assertNull(InviteLink.parseUrl("https://evil.example/join#$fragment"), "wrong origin")
         assertNull(InviteLink.parseUrl("http://calendite.com/join#$fragment"), "not https")
         assertNull(InviteLink.parseUrl("https://calendite.com/other#$fragment"), "wrong path")
@@ -48,11 +50,12 @@ class InviteLinkTest {
     @Test
     fun link_strictParseRejectsMalformed() {
         val secret43 = "A".repeat(43)
-        assertNull(InviteLink.parse("B1.$secret43.AAAAAAAAAAAAAAAAAAAAAA"), "wrong tag")
-        assertNull(InviteLink.parse("A2.$secret43"), "too few fields")
-        assertNull(InviteLink.parse("A2.$secret43.AAAAAAAAAAAAAAAAAAAAAA.extra"), "too many fields")
-        assertNull(InviteLink.parse("A2.${"A".repeat(42)}.AAAAAAAAAAAAAAAAAAAAAA"), "secret decodes to 31 bytes, not 32")
-        assertNull(InviteLink.parse("A2.$secret43=.AAAAAAAAAAAAAAAAAAAAAA"), "padding not allowed")
+        assertNull(InviteLink.parse("B1.1.$secret43.AAAAAAAAAAAAAAAAAAAAAA"), "wrong tag")
+        assertNull(InviteLink.parse("A2.$secret43.AAAAAAAAAAAAAAAAAAAAAA"), "the burned A2 format")
+        assertNull(InviteLink.parse("A3.1.$secret43"), "too few fields")
+        assertNull(InviteLink.parse("A3.1.$secret43.AAAAAAAAAAAAAAAAAAAAAA.extra"), "too many fields")
+        assertNull(InviteLink.parse("A3.1.${"A".repeat(42)}.AAAAAAAAAAAAAAAAAAAAAA"), "secret decodes to 31 bytes, not 32")
+        assertNull(InviteLink.parse("A3.1.$secret43=.AAAAAAAAAAAAAAAAAAAAAA"), "padding not allowed")
     }
 
     @Test

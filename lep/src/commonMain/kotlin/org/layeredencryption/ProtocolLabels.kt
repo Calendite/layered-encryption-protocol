@@ -52,9 +52,6 @@ internal object ProtocolLabels {
     /** Membership log entry signatures. v2: hybrid Ed25519 + ML-DSA-65. */
     const val MEMBERSHIP = "v2/membership"
 
-    /** Async invite bundle signature. v2: hybrid Ed25519 + ML-DSA-65. */
-    const val INVITE_BUNDLE = "v2/invite-bundle"
-
     /** Async pairing transcript hash. */
     const val TRANSCRIPT_ASYNC = "v1/transcript-async"
 
@@ -144,7 +141,7 @@ internal object ProtocolLabels {
     val ALL: Set<String> = setOf(
         LAYER_CHACHA, LAYER_AES, CODE_SECRET, SAS_COMMITMENT,
         MEMBER_KEY_WRAP,
-        MEMBERSHIP, INVITE_BUNDLE, TRANSCRIPT_ASYNC, PAIRING_ASYNC, ASYNC_LINK_AUTH, RENDEZVOUS,
+        MEMBERSHIP, TRANSCRIPT_ASYNC, PAIRING_ASYNC, ASYNC_LINK_AUTH, RENDEZVOUS,
         RENDEZVOUS_ASYNC, CONTEXT_ID,
         TRANSCRIPT_NEGOTIATED, PAIRING_NEGOTIATED, SAS_NEGOTIATED, MEMBER_KEY_WRAP_SUITED,
         DEVICE_IDENTITY_SUITED, KEY_TRANSITION, INVITE_BUNDLE_SUITED,

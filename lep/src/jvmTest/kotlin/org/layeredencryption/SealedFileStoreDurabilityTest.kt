@@ -40,6 +40,7 @@ class SealedFileStoreDurabilityTest {
         masterKey = ByteArray(32) { (seed * 5 + it).toByte() },
         expiryEpochSeconds = 1_000_000L,
         state = AsyncInviteState.PENDING,
+        suiteId = org.layeredencryption.suite.SuiteId(1u),
     )
 
     // ── Restart survival ─────────────────────────────────────────────────────────────────────

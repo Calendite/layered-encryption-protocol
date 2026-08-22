@@ -52,16 +52,18 @@ class Suite1ReproductionTest {
 
     @Test
     fun inviteBundle_rebuildsByteExactly() {
+        val founder = org.layeredencryption.identity.DeviceKeys(
+            identity = DeviceIdentity.deserialise(Suite1Fixtures.founderIdentity()),
+            signingPrivateKey = Suite1Fixtures.founderSigningPrivateKey(),
+            x25519IdentityPrivateKey = Suite1Fixtures.founderX25519PrivateKey(),
+            xWingPrivateKey = Suite1Fixtures.founderXWingPrivateKey(),
+        )
         val rebuilt = InviteBundle.build(
             provider,
             inviteXWingPublicKey = Suite1Fixtures.inviteKemPublicKey(),
-            deviceIdentityA = DeviceIdentity.deserialise(Suite1Fixtures.founderIdentity()),
+            deviceKeysA = founder,
             expiryEpochSeconds = Suite1Fixtures.inviteExpiryEpochSeconds,
             ridAsync = Suite1Fixtures.inviteRidAsync(),
-            signer = KeyPair(
-                DeviceIdentity.deserialise(Suite1Fixtures.founderIdentity()).signingPublicKey,
-                Suite1Fixtures.founderSigningPrivateKey(),
-            ),
         )
         assertContentEquals(Suite1Fixtures.inviteBundle(), rebuilt.serialise())
     }

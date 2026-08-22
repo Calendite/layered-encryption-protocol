@@ -257,6 +257,7 @@ class AsyncInviteStorageFaultTest {
             masterKey = record.masterKey,
             expiryEpochSeconds = record.expiryEpochSeconds,
             state = AsyncInviteState.CLAIMED,
+            suiteId = org.layeredencryption.suite.SuiteId(1u),
         )
         assertFailsWith<PairingException> {
             AsyncInviter.resume(provider, device, forged, nowEpochSeconds = now)

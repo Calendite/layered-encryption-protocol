@@ -26,6 +26,8 @@ class PendingInvite(
     masterKey: ByteArray,
     val expiryEpochSeconds: Long,
     val state: AsyncInviteState,
+    /** The invite's suite (the inviter identity's) — `resume` cross-checks it. */
+    val suiteId: org.layeredencryption.suite.SuiteId,
 ) {
     // Copied both ways: a record is a snapshot, not a window onto the live invite. Code holding
     // a store result cannot mutate an active invite's secrets, and cannot retain aliases the

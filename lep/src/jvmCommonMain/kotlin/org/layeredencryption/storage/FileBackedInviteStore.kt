@@ -109,6 +109,7 @@ class FileBackedInviteStore private constructor(
                     masterKey = reader.readBytes(MAX_FIELD),
                     expiryEpochSeconds = u64FromBytes(reader.readBytes(8)),
                     state = AsyncInviteState.valueOf(reader.readBytes(MAX_FIELD).decodeToString()),
+                    suiteId = readSuiteId(reader),
                 )
                 state.records[invite.ridAsyncHex] = invite
             }
@@ -122,6 +123,14 @@ class FileBackedInviteStore private constructor(
         return state
     }
 
+    private fun readSuiteId(reader: FrameReader): org.layeredencryption.suite.SuiteId {
+        val bytes = reader.readBytes(2)
+        require(bytes.size == 2) { "Suite id must be 2 bytes" }
+        return org.layeredencryption.suite.SuiteId(
+            (((bytes[0].toInt() and 0xFF) shl 8) or (bytes[1].toInt() and 0xFF)).toUShort(),
+        )
+    }
+
     private fun serialise(state: State): ByteArray {
         val writer = FrameWriter().putBytes(u32ToBytes(state.records.size))
         for (invite in state.records.values) {
@@ -132,6 +141,7 @@ class FileBackedInviteStore private constructor(
                 .putBytes(invite.masterKey)
                 .putBytes(u64ToBytes(invite.expiryEpochSeconds))
                 .putBytes(invite.state.name.encodeToByteArray())
+                .putBytes(invite.suiteId.toWireBytes())
         }
         writer.putBytes(u32ToBytes(state.tombstones.size))
         for (tombstone in state.tombstones) writer.putBytes(tombstone.encodeToByteArray())

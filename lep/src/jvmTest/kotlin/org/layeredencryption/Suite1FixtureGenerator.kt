@@ -163,8 +163,8 @@ class Suite1FixtureGenerator {
         val ridAsync = AsyncRendezvous.id(provider, inviteSecret)
         val inviteKem = XWing.generateKeyPair(provider)
         val bundle = InviteBundle.build(
-            provider, inviteKem.publicKey, founder.identity,
-            expiryEpochSeconds = INVITE_EXPIRY, ridAsync = ridAsync, signer = founder.signingKeyPair,
+            provider, inviteKem.publicKey, founder,
+            expiryEpochSeconds = INVITE_EXPIRY, ridAsync = ridAsync,
         )
         out.section("Async invite: A2 link, rid_async, and the signed pre-published bundle.")
         out.appendLine("    const val inviteLinkUrl = \"${link.url()}\"")
@@ -215,6 +215,7 @@ class Suite1FixtureGenerator {
                 masterKey = storeMasterKey,
                 expiryEpochSeconds = INVITE_EXPIRY,
                 state = AsyncInviteState.PENDING,
+                suiteId = founder.identity.suiteId,
             ),
         )
         val freshnessStorePath = storeDir.resolve("freshness.store")

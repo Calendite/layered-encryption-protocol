@@ -287,9 +287,9 @@ class AsyncPairingProtocolTest {
 
     // 15
     @Test
-    fun async_linkCarriesA256BitSecret() {
+    fun async_linkCarriesA256BitSecretAndItsSuite() {
         val inviter = inviter()
-        assertEquals(32, inviter.link.secret.size, "the A2 secret must be 256 bits")
-        assertTrue(inviter.link.fragment().startsWith("A2."))
+        assertEquals(32, inviter.link.secret.size, "the link secret must be 256 bits")
+        assertTrue(inviter.link.fragment().startsWith("A3.1."), "the link names its suite out of band")
     }
 }

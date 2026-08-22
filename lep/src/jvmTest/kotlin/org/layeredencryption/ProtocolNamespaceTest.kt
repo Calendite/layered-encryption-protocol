@@ -39,7 +39,6 @@ class ProtocolNamespaceTest {
         "v2/sas-commitment" to "calendite/v2/sas-commitment",
         "v1/member-key-wrap" to "calendite/v1/member-key-wrap",
         "v2/membership" to "calendite/v2/membership",
-        "v2/invite-bundle" to "calendite/v2/invite-bundle",
         "v1/transcript-async" to "calendite/v1/transcript-async",
         "v1/pairing-async" to "calendite/v1/pairing-async",
         // New with the A2 invite link: keys the cheap link-possession MAC the inviter

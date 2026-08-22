@@ -6,6 +6,8 @@ import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.XWing
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.suite.Suite1
+import org.layeredencryption.suite.SuiteRegistry
+import org.layeredencryption.suite.SuiteResolver
 import org.layeredencryption.pairing.PairingException
 
 /**
@@ -62,11 +64,11 @@ object AsyncWire {
         .putBytes(message.joinerMac)
         .toByteArray()
 
-    fun decodeJoinerResponse(frame: ByteArray): AsyncJoinerResponse =
+    fun decodeJoinerResponse(frame: ByteArray, resolver: SuiteResolver = SuiteRegistry): AsyncJoinerResponse =
         expect(frame, TAG_JOINER_RESPONSE, exactBytes = JOINER_RESPONSE_BYTES) { reader ->
             AsyncJoinerResponse(
                 sized(reader.readBytes(XWing.CIPHERTEXT_SIZE), XWing.CIPHERTEXT_SIZE),
-                DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.serialisedSize(Suite1))),
+                DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.serialisedSize(Suite1)), resolver),
                 sized(reader.readBytes(MAC_BYTES), MAC_BYTES),
                 sized(reader.readBytes(MAC_BYTES), MAC_BYTES),
             )

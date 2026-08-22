@@ -46,8 +46,8 @@ class DecoderRobustnessTest {
         provider, EpochKeys.founding(provider.randomBytes(32)), "ctx", "device-1", seq = 7, plaintext = "op".encodeToByteArray(),
     ).serialise()
     private val bundleBytes = InviteBundle.build(
-        provider, XWing.generateKeyPair(provider).publicKey, founder.identity,
-        expiryEpochSeconds = 1_000_000L, ridAsync = provider.randomBytes(32), signer = founder.signingKeyPair,
+        provider, XWing.generateKeyPair(provider).publicKey, founder,
+        expiryEpochSeconds = 1_000_000L, ridAsync = provider.randomBytes(32),
     ).serialise()
     private val helloFrame = PairingWire.encode(
         InviterHello(provider.randomBytes(XWing.PUBLIC_KEY_SIZE), founder.identity, provider.randomBytes(32)),
@@ -91,18 +91,6 @@ class DecoderRobustnessTest {
     @Test
     fun deviceIdentity_throwsOnlyIllegalArgument() =
         assertOnlyThrows(illegalArgumentOnly, mutations(identityBytes)) { DeviceIdentity.deserialise(it) }
-
-    @Test
-    fun inviteBundleV2_throwsOnlyIllegalArgument() {
-        val keys = DeviceKeys.generate(provider, org.layeredencryption.suite.Suite1)
-        val bundle = org.layeredencryption.invite.InviteBundleV2.build(
-            provider, XWing.generateKeyPair(provider).publicKey, keys,
-            expiryEpochSeconds = 1_000_000L, ridAsync = provider.randomBytes(32),
-        ).serialise()
-        assertOnlyThrows(illegalArgumentOnly, mutations(bundle)) {
-            org.layeredencryption.invite.InviteBundleV2.deserialise(it)
-        }
-    }
 
     @Test
     fun keyTransition_throwsOnlyIllegalArgument() {

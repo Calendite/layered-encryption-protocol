@@ -8,7 +8,6 @@ import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.identity.KeyTransition
 import org.layeredencryption.invite.AsyncWire
 import org.layeredencryption.invite.InviteBundle
-import org.layeredencryption.invite.InviteBundleV2
 import org.layeredencryption.invite.InviteLink
 import org.layeredencryption.membership.MembershipLog
 import org.layeredencryption.membership.SuiteUpgradePayload
@@ -59,9 +58,6 @@ class DecoderFuzz {
     fun inviteBundle(data: ByteArray) = allowIllegalArgument { InviteBundle.deserialise(data) }
 
     @FuzzTest(maxDuration = "30s")
-    fun inviteBundleV2(data: ByteArray) = allowIllegalArgument { InviteBundleV2.deserialise(data) }
-
-    @FuzzTest(maxDuration = "30s")
     fun membershipLog(data: ByteArray) = allowIllegalArgument { MembershipLog.deserialise(data) }
 
     @FuzzTest(maxDuration = "30s")
@@ -109,7 +105,7 @@ class DecoderFuzz {
     @FuzzTest(maxDuration = "30s")
     fun asyncWire(data: ByteArray) {
         for (decode in listOf<(ByteArray) -> Any?>(
-            AsyncWire::decodeJoinerResponse,
+            { frame: ByteArray -> AsyncWire.decodeJoinerResponse(frame) },
             AsyncWire::decodeDelivery,
         )) {
             try {
