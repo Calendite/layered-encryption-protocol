@@ -23,6 +23,7 @@ import java.io.File
 import java.nio.file.Files
 import java.security.SecureRandom
 import kotlin.coroutines.EmptyCoroutineContext
+import org.layeredencryption.suite.Suite1
 import kotlin.test.Test
 
 /**
@@ -130,7 +131,7 @@ class Suite1FixtureGenerator {
 
         // ── 3. Standalone wrapped keys (two recipients) ───────────────────────────────────────
         val wrappedMasterKey = provider.randomBytes(32)
-        val wrappedBlob = WrappedKeys.wrapFor(provider, listOf(founder.identity, member.identity), wrappedMasterKey)
+        val wrappedBlob = WrappedKeys.wrapFor(provider, Suite1, listOf(founder.identity, member.identity), wrappedMasterKey)
         out.section("Standalone WrappedKeys blob: one 32-byte key sealed for founder and member.")
         out.bytes("wrappedKeysBlob", wrappedBlob)
         out.bytes("wrappedMasterKey", wrappedMasterKey)

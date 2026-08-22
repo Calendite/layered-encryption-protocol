@@ -11,6 +11,7 @@ import org.layeredencryption.membership.MembershipOp
 import org.layeredencryption.membership.MembershipVerification
 import org.layeredencryption.membership.WrappedKeys
 import org.layeredencryption.pairing.PairingWire
+import org.layeredencryption.suite.Suite1
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -59,7 +60,7 @@ class Suite1CompatTest {
         assertEquals(3373, HybridSignature.SIGNATURE_SIZE)
         assertEquals(6632, DeviceIdentity.serialisedSize(org.layeredencryption.suite.Suite1))
 
-        assertEquals(2, LaneEnvelope.VERSION)
+        assertEquals(3, LaneEnvelope.VERSION)
         assertEquals(1, PairingWire.TAG_INVITER_HELLO)
         assertEquals(2, PairingWire.TAG_JOINER_RESPONSE)
         assertEquals(3, PairingWire.TAG_INVITER_CONFIRM)
@@ -75,7 +76,7 @@ class Suite1CompatTest {
         assertEquals(
             setOf(
                 "v1/layer-chacha", "v1/layer-aes", "v1/code-secret",
-                "v2/sas-commitment", "v1/member-key-wrap", "v2/membership",
+                "v2/sas-commitment", "v2/membership",
                 "v1/transcript-async", "v1/pairing-async", "v1/async-link-auth",
                 "rendezvous/v1", "rendezvous-async/v1", "context-id/v2",
                 // Phase 1 crypto agility.
@@ -154,11 +155,11 @@ class Suite1CompatTest {
                 DeviceIdentity.deserialise(Suite1Fixtures.founderIdentity()).signingPublicKey.toHexString(),
                 DeviceIdentity.deserialise(Suite1Fixtures.memberIdentity()).signingPublicKey.toHexString(),
             ),
-            WrappedKeys.recipientsOf(blob),
+            WrappedKeys.recipientsOf(Suite1, blob),
         )
         val provider = provider ?: return
-        assertContentEquals(Suite1Fixtures.wrappedMasterKey(), WrappedKeys.unwrapFor(provider, blob, founderKeys()))
-        assertContentEquals(Suite1Fixtures.wrappedMasterKey(), WrappedKeys.unwrapFor(provider, blob, memberKeys()))
+        assertContentEquals(Suite1Fixtures.wrappedMasterKey(), WrappedKeys.unwrapFor(provider, Suite1, blob, founderKeys()))
+        assertContentEquals(Suite1Fixtures.wrappedMasterKey(), WrappedKeys.unwrapFor(provider, Suite1, blob, memberKeys()))
     }
 
     // ── Lane envelope + epoch keys ────────────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ import org.layeredencryption.pairing.SuiteAccept
 import org.layeredencryption.pairing.SuiteOffer
 import org.layeredencryption.suite.SuiteId
 import kotlin.random.Random
+import org.layeredencryption.suite.Suite1
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
@@ -55,7 +56,7 @@ class DecoderRobustnessTest {
     private val epochKeysBytes = EpochKeys.founding(provider.randomBytes(32))
         .withNextEpoch(provider.randomBytes(32))
         .serialise()
-    private val wrappedBlob = WrappedKeys.wrapFor(provider, listOf(founder.identity, member.identity), provider.randomBytes(32))
+    private val wrappedBlob = WrappedKeys.wrapFor(provider, Suite1, listOf(founder.identity, member.identity), provider.randomBytes(32))
 
     /** Deterministic corpus: same seed, same mutations, every run. */
     private fun mutations(bytes: ByteArray): List<ByteArray> {
@@ -109,15 +110,6 @@ class DecoderRobustnessTest {
         assertOnlyThrows(illegalArgumentOnly, mutations(envelopeBytes)) { LaneEnvelope.deserialise(it) }
 
     @Test
-    fun laneEnvelopeV3_throwsOnlyIllegalArgument() {
-        val v3 = LaneEnvelope.sealSuited(
-            provider, EpochKeys.founding(provider.randomBytes(32)), org.layeredencryption.suite.Suite1,
-            "ctx", "device-1", seq = 7, plaintext = "op".encodeToByteArray(),
-        ).serialise()
-        assertOnlyThrows(illegalArgumentOnly, mutations(v3)) { LaneEnvelope.deserialise(it) }
-    }
-
-    @Test
     fun inviteBundle_throwsOnlyIllegalArgument() =
         assertOnlyThrows(illegalArgumentOnly, mutations(bundleBytes)) { InviteBundle.deserialise(it) }
 
@@ -163,8 +155,8 @@ class DecoderRobustnessTest {
     @Test
     fun wrappedKeys_neverThrows() =
         assertOnlyThrows(nothing, mutations(wrappedBlob)) {
-            WrappedKeys.recipientsOf(it)
-            WrappedKeys.unwrapFor(provider, it, member)
+            WrappedKeys.recipientsOf(Suite1, it)
+            WrappedKeys.unwrapFor(provider, Suite1, it, member)
         }
 
     // ── Targeted canonical rejections ─────────────────────────────────────────────────────────
@@ -189,6 +181,7 @@ class DecoderRobustnessTest {
     fun laneEnvelope_rejectsUnknownVersionsAndNonCanonicalNumbers() {
         fun envelope(version: String, seq: String) = FrameWriter()
             .putBytes(version.encodeToByteArray())
+            .putBytes("1".encodeToByteArray()) // suite id
             .putBytes("ctx".encodeToByteArray())
             .putBytes("lane".encodeToByteArray())
             .putBytes(seq.encodeToByteArray())
@@ -196,13 +189,13 @@ class DecoderRobustnessTest {
             .putBytes(ByteArray(48))
             .toByteArray()
 
-        LaneEnvelope.deserialise(envelope("2", "7")) // the canonical form parses
-        assertFailsWith<IllegalArgumentException>("older version") { LaneEnvelope.deserialise(envelope("1", "7")) }
-        assertFailsWith<IllegalArgumentException>("newer version") { LaneEnvelope.deserialise(envelope("3", "7")) }
-        assertFailsWith<IllegalArgumentException>("negative seq") { LaneEnvelope.deserialise(envelope("2", "-1")) }
-        assertFailsWith<IllegalArgumentException>("leading zero") { LaneEnvelope.deserialise(envelope("2", "07")) }
-        assertFailsWith<IllegalArgumentException>("plus sign") { LaneEnvelope.deserialise(envelope("2", "+7")) }
-        assertFailsWith<IllegalArgumentException>("overflow") { LaneEnvelope.deserialise(envelope("2", "9999999999")) }
+        LaneEnvelope.deserialise(envelope("3", "7")) // the canonical form parses
+        assertFailsWith<IllegalArgumentException>("retired version") { LaneEnvelope.deserialise(envelope("2", "7")) }
+        assertFailsWith<IllegalArgumentException>("newer version") { LaneEnvelope.deserialise(envelope("4", "7")) }
+        assertFailsWith<IllegalArgumentException>("negative seq") { LaneEnvelope.deserialise(envelope("3", "-1")) }
+        assertFailsWith<IllegalArgumentException>("leading zero") { LaneEnvelope.deserialise(envelope("3", "07")) }
+        assertFailsWith<IllegalArgumentException>("plus sign") { LaneEnvelope.deserialise(envelope("3", "+7")) }
+        assertFailsWith<IllegalArgumentException>("overflow") { LaneEnvelope.deserialise(envelope("3", "9999999999")) }
     }
 
     @Test

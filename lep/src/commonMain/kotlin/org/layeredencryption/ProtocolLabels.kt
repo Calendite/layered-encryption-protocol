@@ -38,17 +38,6 @@ internal object ProtocolLabels {
     /** Derivation of the shared secret from the typed pairing code. */
     const val CODE_SECRET = "v1/code-secret"
 
-    /**
-     * Wrapping a context key for one member's device identity.
-     *
-     * New in v3, and the reason the identity format changed. Rotating the master key means handing
-     * the new one to everybody who remains, and after pairing there is no shared per-pair key left
-     * to do it with. Wrapping under the identity's X25519 key would have worked and would have been
-     * classical-only, so a recorded rotation would fall to a quantum adversary and undo the rest of
-     * the protocol's post-quantum work.
-     */
-    const val MEMBER_KEY_WRAP = "v1/member-key-wrap"
-
     /** Membership log entry signatures. v2: hybrid Ed25519 + ML-DSA-65. */
     const val MEMBERSHIP = "v2/membership"
 
@@ -92,7 +81,8 @@ internal object ProtocolLabels {
 
     /**
      * Suite-parameterised member-key wrap (SUITE_UPGRADE and post-upgrade rotations); the 2-byte
-     * suite id is appended to the info. [MEMBER_KEY_WRAP] stays frozen for Suite 1 entries.
+     * suite id is appended to the info. (The pre-release
+     * "v1/member-key-wrap" label was pruned with the un-suited construction it keyed.)
      *
      * When a real Suite 2 is standardized, its *internal* domain labels (layer keys and the
      * like) get their own `LEP-SUITE-NNNN/<operation>/<version>` namespace per the migration
@@ -140,7 +130,6 @@ internal object ProtocolLabels {
     /** The complete set, for the freeze test to compare against. */
     val ALL: Set<String> = setOf(
         LAYER_CHACHA, LAYER_AES, CODE_SECRET, SAS_COMMITMENT,
-        MEMBER_KEY_WRAP,
         MEMBERSHIP, TRANSCRIPT_ASYNC, PAIRING_ASYNC, ASYNC_LINK_AUTH, RENDEZVOUS,
         RENDEZVOUS_ASYNC, CONTEXT_ID,
         TRANSCRIPT_NEGOTIATED, PAIRING_NEGOTIATED, SAS_NEGOTIATED, MEMBER_KEY_WRAP_SUITED,

@@ -72,7 +72,7 @@ class DecoderFuzz {
     /** Contract: empty list on malformed, never a throw. */
     @FuzzTest(maxDuration = "30s")
     fun wrappedKeysRecipients(data: ByteArray) {
-        WrappedKeys.recipientsOf(data)
+        WrappedKeys.recipientsOf(org.layeredencryption.suite.Suite1, data)
     }
 
     /** Contract: null on anything malformed, never a throw. */

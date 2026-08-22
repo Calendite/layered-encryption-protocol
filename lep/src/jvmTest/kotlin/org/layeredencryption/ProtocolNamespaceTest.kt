@@ -37,7 +37,6 @@ class ProtocolNamespaceTest {
         "v1/layer-aes" to "calendite/v1/layer-aes",
         "v1/code-secret" to "calendite/v1/code-secret",
         "v2/sas-commitment" to "calendite/v2/sas-commitment",
-        "v1/member-key-wrap" to "calendite/v1/member-key-wrap",
         "v2/membership" to "calendite/v2/membership",
         "v1/transcript-async" to "calendite/v1/transcript-async",
         "v1/pairing-async" to "calendite/v1/pairing-async",

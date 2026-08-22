@@ -5,6 +5,7 @@ import org.layeredencryption.membership.MembershipLog
 import org.layeredencryption.membership.MembershipOp
 import org.layeredencryption.membership.MembershipVerification
 import org.layeredencryption.membership.WrappedKeys
+import org.layeredencryption.suite.Suite1
 import kotlin.test.Test
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
@@ -30,7 +31,7 @@ class MembershipRecipientValidationTest {
         .append(provider, MembershipOp.ADD, c.identity, null, a.signingKeyPair)
 
     private fun wrapFor(vararg recipients: DeviceKeys): ByteArray =
-        WrappedKeys.wrapFor(provider, recipients.map { it.identity }, provider.randomBytes(32))
+        WrappedKeys.wrapFor(provider, Suite1, recipients.map { it.identity }, provider.randomBytes(32))
 
     private fun assertInvalid(entry: MembershipLog, reason: String) {
         val verification = assertIs<MembershipVerification.Invalid>(entry.verify(provider))

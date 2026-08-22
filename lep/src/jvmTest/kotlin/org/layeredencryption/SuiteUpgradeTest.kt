@@ -12,6 +12,7 @@ import org.layeredencryption.membership.WrappedKeys
 import org.layeredencryption.suite.FakeSuites
 import org.layeredencryption.suite.SuiteId
 import org.layeredencryption.suite.SuiteRegistry
+import org.layeredencryption.suite.Suite1
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -58,7 +59,7 @@ class SuiteUpgradeTest {
     }
 
     private fun wrappedForAll(log: MembershipLog, key: ByteArray) =
-        WrappedKeys.wrapForEra(provider, fake, log.activeIdentities(provider), key)
+        WrappedKeys.wrapFor(provider, fake, log.activeIdentities(provider), key)
 
     // ── The happy path ────────────────────────────────────────────────────────────────────────
 
@@ -133,7 +134,7 @@ class SuiteUpgradeTest {
         val base = foundedLog()
         val sameSuite = SuiteUpgradePayload(
             SuiteId.LEP_HYBRID_2026, SuiteId.LEP_HYBRID_2026, 1,
-            WrappedKeys.wrapFor(provider, base.activeIdentities(provider), provider.randomBytes(32)),
+            WrappedKeys.wrapFor(provider, Suite1, base.activeIdentities(provider), provider.randomBytes(32)),
         )
         val same = base.withRawEntry(MembershipOp.SUITE_UPGRADE, founder.identity, sameSuite.serialise(), founder)
         val sameResult = same.verify(provider, resolver = resolver)
@@ -145,7 +146,7 @@ class SuiteUpgradeTest {
         val upgraded = base.upgradeSuite(provider, fake, provider.randomBytes(32), founder, resolver = resolver)
         val downPayload = SuiteUpgradePayload(
             FakeSuites.FAKE_ID, SuiteId.LEP_HYBRID_2026, 2,
-            WrappedKeys.wrapFor(provider, upgraded.activeIdentities(provider), provider.randomBytes(32)),
+            WrappedKeys.wrapFor(provider, Suite1, upgraded.activeIdentities(provider), provider.randomBytes(32)),
         )
         val downgraded = upgraded.withRawEntry(MembershipOp.SUITE_UPGRADE, founder.identity, downPayload.serialise(), founder)
         val result = downgraded.verify(provider, resolver = resolver)
@@ -164,7 +165,7 @@ class SuiteUpgradeTest {
 
         val omitting = SuiteUpgradePayload(
             SuiteId.LEP_HYBRID_2026, FakeSuites.FAKE_ID, 1,
-            WrappedKeys.wrapForEra(provider, fake, listOf(founder.identity), provider.randomBytes(32)),
+            WrappedKeys.wrapFor(provider, fake, listOf(founder.identity), provider.randomBytes(32)),
         )
         val omitted = base.withRawEntry(MembershipOp.SUITE_UPGRADE, founder.identity, omitting.serialise(), founder)
         val omittedResult = omitted.verify(provider, resolver = resolver)
@@ -174,7 +175,7 @@ class SuiteUpgradeTest {
         val stranger = DeviceKeys.generate(provider)
         val padding = SuiteUpgradePayload(
             SuiteId.LEP_HYBRID_2026, FakeSuites.FAKE_ID, 1,
-            WrappedKeys.wrapForEra(
+            WrappedKeys.wrapFor(
                 provider, fake,
                 listOf(founder.identity, member.identity, stranger.identity), provider.randomBytes(32),
             ),

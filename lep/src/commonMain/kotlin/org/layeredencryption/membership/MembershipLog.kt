@@ -336,7 +336,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             provider = provider,
             op = MembershipOp.REVOKE,
             deviceIdentity = removed,
-            wrappedKeys = WrappedKeys.wrapForEra(provider, currentEraSuite(resolver), remaining, newMasterKey, namespace),
+            wrappedKeys = WrappedKeys.wrapFor(provider, currentEraSuite(resolver), remaining, newMasterKey, namespace),
             signer = signer,
             namespace = namespace,
             resolver = resolver,
@@ -362,7 +362,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         provider = provider,
         op = MembershipOp.ROTATE,
         deviceIdentity = signer.identity,
-        wrappedKeys = WrappedKeys.wrapForEra(provider, currentEraSuite(resolver), activeIdentities(provider), newMasterKey, namespace),
+        wrappedKeys = WrappedKeys.wrapFor(provider, currentEraSuite(resolver), activeIdentities(provider), newMasterKey, namespace),
         signer = signer.signingKeyPair,
         namespace = namespace,
         resolver = resolver,
@@ -401,7 +401,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             oldSuite = current.id,
             newSuite = newSuite.id,
             transitionEpoch = epochCount() + 1,
-            wrappedKeys = WrappedKeys.wrapForEra(provider, newSuite, activeIdentities(provider), newMasterKey, namespace),
+            wrappedKeys = WrappedKeys.wrapFor(provider, newSuite, activeIdentities(provider), newMasterKey, namespace),
         )
         return append(
             provider = provider,
@@ -434,7 +434,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
             when (entry.op) {
                 MembershipOp.REVOKE, MembershipOp.ROTATE ->
                     entry.wrappedKeys
-                        ?.let { WrappedKeys.unwrapForEra(provider, era, it, device, namespace) }
+                        ?.let { WrappedKeys.unwrapFor(provider, era, it, device, namespace) }
                         ?.let { keys += it }
                 MembershipOp.SUITE_UPGRADE -> {
                     // On a verified log this always parses and resolves; anything else
@@ -442,7 +442,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
                     val payload = entry.wrappedKeys?.let { SuiteUpgradePayload.parse(it) } ?: continue
                     if (!resolver.contains(payload.newSuite)) continue
                     val newEra = resolver.require(payload.newSuite)
-                    WrappedKeys.unwrapForEra(provider, newEra, payload.wrappedKeys, device, namespace)
+                    WrappedKeys.unwrapFor(provider, newEra, payload.wrappedKeys, device, namespace)
                         ?.let { keys += it }
                     era = newEra
                 }
@@ -871,7 +871,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         }
         if (payload.transitionEpoch != epochsSoFar + 1) return fail("Suite upgrade transition epoch does not match the chain")
         val newSuite = resolver.require(payload.newSuite)
-        val recipients = WrappedKeys.recipientsOrNullForEra(newSuite, payload.wrappedKeys)
+        val recipients = WrappedKeys.recipientsOrNull(newSuite, payload.wrappedKeys)
             ?: return fail("Suite upgrade carries malformed wrapped keys")
         if (recipients.size != recipients.toSet().size) return fail("Suite upgrade wraps a duplicate recipient")
         if (recipients.toSet() != members) {
@@ -888,7 +888,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
      */
     private fun checkRecipients(entry: MembershipEntry, expected: Set<String>, what: String, suite: ProtocolSuite): String? {
         val wrapped = entry.wrappedKeys ?: return "$what is missing its wrapped keys"
-        val recipients = WrappedKeys.recipientsOrNullForEra(suite, wrapped) ?: return "$what carries malformed wrapped keys"
+        val recipients = WrappedKeys.recipientsOrNull(suite, wrapped) ?: return "$what carries malformed wrapped keys"
         if (recipients.size != recipients.toSet().size) return "$what wraps a duplicate recipient"
         if (recipients.toSet() != expected) {
             return "$what must wrap the key for exactly the active members it leaves behind"

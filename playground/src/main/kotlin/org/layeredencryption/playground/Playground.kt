@@ -170,7 +170,7 @@ private fun sendMessage(session: Session, text: String, tamper: Boolean) {
     // the addressing would be a tidier story and the wrong one.
     val header = LaneEnvelope(
         LaneEnvelope.VERSION, session.contextId, session.laneA, session.seq,
-        session.keys.current, ByteArray(0),
+        session.keys.current, ByteArray(0), org.layeredencryption.suite.Suite1.id,
     )
     events.add(
         "message", "A", "Addressed",

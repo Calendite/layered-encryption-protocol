@@ -10,6 +10,7 @@ import org.layeredencryption.membership.MembershipOp
 import org.layeredencryption.membership.MembershipVerification
 import org.layeredencryption.membership.Reconciliation
 import org.layeredencryption.membership.WrappedKeys
+import org.layeredencryption.suite.Suite1
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -382,7 +383,7 @@ class MembershipForkResolutionTest {
         val b = DeviceKeys.generate(provider)
         val outsider = DeviceKeys.generate(provider)
         val log = MembershipLog.found(provider, a.identity, a.signingKeyPair).add(b, a)
-        val wrapped = WrappedKeys.wrapFor(provider, listOf(a.identity, b.identity), newKey())
+        val wrapped = WrappedKeys.wrapFor(provider, Suite1, listOf(a.identity, b.identity), newKey())
 
         // A rotation about somebody else is not a rotation.
         val impersonating = log.append(provider, MembershipOp.ROTATE, b.identity, wrapped, a.signingKeyPair)

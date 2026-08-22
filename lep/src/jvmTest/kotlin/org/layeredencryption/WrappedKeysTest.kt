@@ -2,6 +2,7 @@ package org.layeredencryption
 
 import org.layeredencryption.identity.DeviceKeys
 import org.layeredencryption.membership.WrappedKeys
+import org.layeredencryption.suite.Suite1
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -27,10 +28,10 @@ class WrappedKeysTest {
         val mum = DeviceKeys.generate(provider)
         val secret = provider.randomBytes(32)
 
-        val blob = WrappedKeys.wrapFor(provider, listOf(sarah.identity, mum.identity), secret)
+        val blob = WrappedKeys.wrapFor(provider, Suite1, listOf(sarah.identity, mum.identity), secret)
 
-        assertContentEquals(secret, WrappedKeys.unwrapFor(provider, blob, sarah))
-        assertContentEquals(secret, WrappedKeys.unwrapFor(provider, blob, mum))
+        assertContentEquals(secret, WrappedKeys.unwrapFor(provider, Suite1, blob, sarah))
+        assertContentEquals(secret, WrappedKeys.unwrapFor(provider, Suite1, blob, mum))
     }
 
     /** The whole point: someone left out of the rotation cannot read what it carried. */
@@ -39,10 +40,10 @@ class WrappedKeysTest {
         val remaining = DeviceKeys.generate(provider)
         val removed = DeviceKeys.generate(provider)
 
-        val blob = WrappedKeys.wrapFor(provider, listOf(remaining.identity), provider.randomBytes(32))
+        val blob = WrappedKeys.wrapFor(provider, Suite1, listOf(remaining.identity), provider.randomBytes(32))
 
-        assertNull(WrappedKeys.unwrapFor(provider, blob, removed), "a revoked device must not recover the new key")
-        assertNotNull(WrappedKeys.unwrapFor(provider, blob, remaining))
+        assertNull(WrappedKeys.unwrapFor(provider, Suite1, blob, removed), "a revoked device must not recover the new key")
+        assertNotNull(WrappedKeys.unwrapFor(provider, Suite1, blob, remaining))
     }
 
     /**
@@ -55,14 +56,14 @@ class WrappedKeysTest {
         val mum = DeviceKeys.generate(provider)
         val secret = provider.randomBytes(32)
 
-        val sarahOnly = WrappedKeys.wrapFor(provider, listOf(sarah.identity), secret)
+        val sarahOnly = WrappedKeys.wrapFor(provider, Suite1, listOf(sarah.identity), secret)
         val sarahId = sarah.identity.signingPublicKey.toHexString()
         val mumId = mum.identity.signingPublicKey.toHexString()
 
         // Swap the addressee, leaving the sealed bytes alone.
         val reAddressed = sarahOnly.decodeToString().replace(sarahId, mumId).encodeToByteArray()
 
-        assertNull(WrappedKeys.unwrapFor(provider, reAddressed, mum), "the tag covers who it was for")
+        assertNull(WrappedKeys.unwrapFor(provider, Suite1, reAddressed, mum), "the tag covers who it was for")
     }
 
     @Test
@@ -70,11 +71,11 @@ class WrappedKeysTest {
         val a = DeviceKeys.generate(provider)
         val b = DeviceKeys.generate(provider)
 
-        val blob = WrappedKeys.wrapFor(provider, listOf(a.identity, b.identity), provider.randomBytes(32))
+        val blob = WrappedKeys.wrapFor(provider, Suite1, listOf(a.identity, b.identity), provider.randomBytes(32))
 
         assertEquals(
             listOf(a.identity.signingPublicKey.toHexString(), b.identity.signingPublicKey.toHexString()),
-            WrappedKeys.recipientsOf(blob),
+            WrappedKeys.recipientsOf(Suite1, blob),
         )
     }
 
@@ -82,9 +83,9 @@ class WrappedKeysTest {
     fun `malformed input yields nothing rather than throwing`() {
         val device = DeviceKeys.generate(provider)
 
-        assertNull(WrappedKeys.unwrapFor(provider, ByteArray(0), device))
-        assertNull(WrappedKeys.unwrapFor(provider, provider.randomBytes(200), device))
-        assertEquals(emptyList(), WrappedKeys.recipientsOf(provider.randomBytes(9)))
+        assertNull(WrappedKeys.unwrapFor(provider, Suite1, ByteArray(0), device))
+        assertNull(WrappedKeys.unwrapFor(provider, Suite1, provider.randomBytes(200), device))
+        assertEquals(emptyList(), WrappedKeys.recipientsOf(Suite1, provider.randomBytes(9)))
     }
 
     // ── The identity that makes it possible ───────────────────────────────────────────────────

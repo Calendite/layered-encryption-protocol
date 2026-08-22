@@ -117,7 +117,7 @@ class EnvelopeFreshnessTest {
         val store = InMemoryFreshnessStore()
         // A relay forges a high-sequence envelope with garbage ciphertext: AEAD rejects it, and
         // because acceptance is recorded only after authentication, the sequence is NOT burned.
-        val forged = LaneEnvelope(LaneEnvelope.VERSION, "ctx", "device-1", 100, 0, provider.randomBytes(64))
+        val forged = LaneEnvelope(LaneEnvelope.VERSION, "ctx", "device-1", 100, 0, provider.randomBytes(64), org.layeredencryption.suite.SuiteId(1u))
         assertFailsWith<CryptoException> { forged.openFresh(store) }
 
         // The real op at seq 100 still goes through.
