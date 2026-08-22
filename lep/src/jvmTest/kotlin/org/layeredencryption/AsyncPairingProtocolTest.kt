@@ -190,6 +190,7 @@ class AsyncPairingProtocolTest {
         val response = joiner().onBundle(inviter.link, inviter.bundle, now)
         val real = response.deviceIdentityS
         val tamperedIdentity = DeviceIdentity(
+            real.suiteId,
             real.signingPublicKey,
             real.x25519IdentityPublicKey,
             real.xWingPublicKey,

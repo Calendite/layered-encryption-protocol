@@ -57,8 +57,8 @@ class Suite1CompatTest {
         assertEquals(1216, XWing.PUBLIC_KEY_SIZE)
         assertEquals(1984, HybridSignature.PUBLIC_KEY_SIZE)
         assertEquals(3373, HybridSignature.SIGNATURE_SIZE)
-        assertEquals(6621, DeviceIdentity.SERIALISED_SIZE)
-        assertEquals(11234, InviteBundle.SERIALISED_SIZE)
+        assertEquals(6632, DeviceIdentity.serialisedSize(org.layeredencryption.suite.Suite1))
+        assertEquals(11245, InviteBundle.SERIALISED_SIZE)
         assertEquals(2, LaneEnvelope.VERSION)
         assertEquals(1, PairingWire.TAG_INVITER_HELLO)
         assertEquals(2, PairingWire.TAG_JOINER_RESPONSE)
@@ -75,7 +75,7 @@ class Suite1CompatTest {
         assertEquals(
             setOf(
                 "v1/layer-chacha", "v1/layer-aes", "v1/transcript", "v1/pairing", "v1/code-secret",
-                "v2/sas-commitment", "v3/device-identity", "v1/member-key-wrap", "v2/membership",
+                "v2/sas-commitment", "v1/member-key-wrap", "v2/membership",
                 "v2/invite-bundle", "v1/transcript-async", "v1/pairing-async", "v1/async-link-auth",
                 "rendezvous/v1", "rendezvous-async/v1", "context-id/v2",
                 // Phase 1 crypto agility.
@@ -91,7 +91,7 @@ class Suite1CompatTest {
     @Test
     fun deviceIdentity_parsesVerifiesAndReserialisesByteExactly() {
         for (bytes in listOf(Suite1Fixtures.founderIdentity(), Suite1Fixtures.memberIdentity())) {
-            assertEquals(DeviceIdentity.SERIALISED_SIZE, bytes.size)
+            assertEquals(DeviceIdentity.serialisedSize(org.layeredencryption.suite.Suite1), bytes.size)
             val identity = DeviceIdentity.deserialise(bytes)
             assertContentEquals(bytes, identity.serialise(), "identity must re-serialise byte-exactly")
             provider?.let { assertTrue(identity.verifyBinding(it), "binding signature must verify") }

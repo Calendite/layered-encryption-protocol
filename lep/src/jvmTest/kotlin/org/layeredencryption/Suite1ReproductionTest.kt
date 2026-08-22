@@ -31,7 +31,7 @@ class Suite1ReproductionTest {
             provider,
             Suite1Fixtures.founderSigningPrivateKey(),
             DeviceIdentity.bindingMessage(
-                identity.signingPublicKey, identity.x25519IdentityPublicKey, identity.xWingPublicKey,
+                identity.suiteId, identity.signingPublicKey, identity.x25519IdentityPublicKey, identity.xWingPublicKey,
             ),
         )
         assertContentEquals(identity.bindingSignature, resigned)

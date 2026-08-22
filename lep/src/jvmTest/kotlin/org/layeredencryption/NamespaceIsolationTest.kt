@@ -33,7 +33,7 @@ class NamespaceIsolationTest {
 
     @Test
     fun deviceIdentitiesDoNotVerifyAcrossNamespaces() {
-        val device = DeviceKeys.generate(provider, appA)
+        val device = DeviceKeys.generate(provider, namespace = appA)
         assertTrue(device.identity.verifyBinding(provider, appA), "an identity verifies under its own namespace")
         assertFalse(device.identity.verifyBinding(provider, appB), "and under nobody else's")
         assertFalse(device.identity.verifyBinding(provider), "including the default")
@@ -41,8 +41,8 @@ class NamespaceIsolationTest {
 
     @Test
     fun membershipLogsDoNotVerifyAcrossNamespaces() {
-        val owner = DeviceKeys.generate(provider, appA)
-        val member = DeviceKeys.generate(provider, appA)
+        val owner = DeviceKeys.generate(provider, namespace = appA)
+        val member = DeviceKeys.generate(provider, namespace = appA)
         val log = MembershipLog.found(provider, owner.identity, owner.signingKeyPair, namespace = appA)
             .append(provider, org.layeredencryption.membership.MembershipOp.ADD, member.identity, null, owner.signingKeyPair, appA)
 
@@ -61,13 +61,13 @@ class NamespaceIsolationTest {
 
         // Cross-namespace: the joiner's code-keyed MAC is derived under different labels, so the
         // inviter rejects it exactly as it would a wrong code or a man-in-the-middle.
-        val inviterA = Inviter(provider, DeviceKeys.generate(provider, appA), code, namespace = appA)
-        val joinerB = Joiner(provider, DeviceKeys.generate(provider, appB), code, namespace = appB)
+        val inviterA = Inviter(provider, DeviceKeys.generate(provider, namespace = appA), code, namespace = appA)
+        val joinerB = Joiner(provider, DeviceKeys.generate(provider, namespace = appB), code, namespace = appB)
         assertFailsWith<PairingException> { inviterA.onJoinerResponse(joinerB.onInviterHello(inviterA.hello())) }
 
         // Same custom namespace end to end: the full ceremony completes and keys match.
-        val inviter = Inviter(provider, DeviceKeys.generate(provider, appA), code, namespace = appA)
-        val joiner = Joiner(provider, DeviceKeys.generate(provider, appA), code, namespace = appA)
+        val inviter = Inviter(provider, DeviceKeys.generate(provider, namespace = appA), code, namespace = appA)
+        val joiner = Joiner(provider, DeviceKeys.generate(provider, namespace = appA), code, namespace = appA)
         val response = joiner.onInviterHello(inviter.hello())
         joiner.onInviterConfirm(inviter.onJoinerResponse(response))
         joiner.onInviterComplete(inviter.complete(inviter.confirmSas()), joiner.confirmSas())
@@ -82,16 +82,16 @@ class NamespaceIsolationTest {
         // Cross-namespace: the joiner recomputes rid_async under its own labels, so the bundle
         // signature check fails before any key agreement begins.
         val inviterA = AsyncInviter.create(
-            provider, DeviceKeys.generate(provider, appA), now, expiry, namespace = appA,
+            provider, DeviceKeys.generate(provider, namespace = appA), now, expiry, namespace = appA,
         )
-        val joinerB = AsyncJoiner(provider, DeviceKeys.generate(provider, appB), appB)
+        val joinerB = AsyncJoiner(provider, DeviceKeys.generate(provider, namespace = appB), appB)
         assertFailsWith<PairingException> { joinerB.onBundle(inviterA.link, inviterA.bundle, now) }
 
         // Same custom namespace end to end.
         val inviter = AsyncInviter.create(
-            provider, DeviceKeys.generate(provider, appA), now, expiry, namespace = appA,
+            provider, DeviceKeys.generate(provider, namespace = appA), now, expiry, namespace = appA,
         )
-        val joiner = AsyncJoiner(provider, DeviceKeys.generate(provider, appA), appA)
+        val joiner = AsyncJoiner(provider, DeviceKeys.generate(provider, namespace = appA), appA)
         val outcome = inviter.onResponse(joiner.onBundle(inviter.link, inviter.bundle, now), now)
         assertTrue(outcome is ResponseOutcome.Claimed)
         joiner.onDelivery(inviter.approve())

@@ -54,7 +54,7 @@ class SuiteUpgradeTest {
             head, op, subject, wrapped, signer.identity.signingPublicKey,
             HybridSignature.sign(provider, signer.signingPrivateKey, unsigned.unsignedBytes()),
         )
-        return MembershipLog.deserialise(serialise() + FrameWriter().putBytes(entry.serialise()).toByteArray())
+        return MembershipLog.deserialise(serialise() + FrameWriter().putBytes(entry.serialise()).toByteArray(), resolver)
     }
 
     private fun wrappedForAll(log: MembershipLog, key: ByteArray) =
@@ -194,11 +194,13 @@ class SuiteUpgradeTest {
         assertIs<MembershipVerification.Invalid>(epochResult)
         assertEquals(true, "epoch" in epochResult.reason, epochResult.reason)
 
+        // An unknown target suite now fails closed at *parse*: the structural era walk cannot
+        // size anything under a suite it does not know, so the log is unreadable, not merely
+        // invalid — the same stance as every other unknown-suite artifact.
         val unknown = SuiteUpgradePayload(SuiteId.LEP_HYBRID_2026, SuiteId(0x7777u), 1, wrappedKeys)
-        val unknownResult = base.withRawEntry(MembershipOp.SUITE_UPGRADE, founder.identity, unknown.serialise(), founder)
-            .verify(provider, resolver = resolver)
-        assertIs<MembershipVerification.Invalid>(unknownResult)
-        assertEquals(true, "unknown suite" in unknownResult.reason, unknownResult.reason)
+        assertFailsWith<IllegalArgumentException> {
+            base.withRawEntry(MembershipOp.SUITE_UPGRADE, founder.identity, unknown.serialise(), founder)
+        }
     }
 
     @Test

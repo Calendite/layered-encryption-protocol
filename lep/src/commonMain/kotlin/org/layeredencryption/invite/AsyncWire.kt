@@ -5,6 +5,7 @@ import org.layeredencryption.FrameWriter
 import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.XWing
 import org.layeredencryption.identity.DeviceIdentity
+import org.layeredencryption.suite.Suite1
 import org.layeredencryption.pairing.PairingException
 
 /**
@@ -43,9 +44,9 @@ object AsyncWire {
     // Every ceremony message has exactly one legal size except the delivery, whose log field is
     // bounded; a frame that trades bytes between fields while keeping the total is rejected by
     // the per-field exact-size checks.
-    private const val JOINER_RESPONSE_BYTES = HEADER_BYTES +
+    private val JOINER_RESPONSE_BYTES = HEADER_BYTES +
         LENGTH_PREFIX + XWing.CIPHERTEXT_SIZE +
-        LENGTH_PREFIX + DeviceIdentity.SERIALISED_SIZE +
+        LENGTH_PREFIX + DeviceIdentity.serialisedSize(Suite1) +
         LENGTH_PREFIX + MAC_BYTES +
         LENGTH_PREFIX + MAC_BYTES
     private const val DELIVERY_MAX_BYTES = HEADER_BYTES +
@@ -65,7 +66,7 @@ object AsyncWire {
         expect(frame, TAG_JOINER_RESPONSE, exactBytes = JOINER_RESPONSE_BYTES) { reader ->
             AsyncJoinerResponse(
                 sized(reader.readBytes(XWing.CIPHERTEXT_SIZE), XWing.CIPHERTEXT_SIZE),
-                DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.SERIALISED_SIZE)),
+                DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.serialisedSize(Suite1))),
                 sized(reader.readBytes(MAC_BYTES), MAC_BYTES),
                 sized(reader.readBytes(MAC_BYTES), MAC_BYTES),
             )

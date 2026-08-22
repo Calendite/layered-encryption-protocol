@@ -3,26 +3,32 @@ package org.layeredencryption.identity
 import org.layeredencryption.ProtocolLabels
 import org.layeredencryption.ProtocolNamespace
 import org.layeredencryption.CryptoProvider
-import org.layeredencryption.HybridSignature
 import org.layeredencryption.KeyPair
-import org.layeredencryption.XWing
 import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
+import org.layeredencryption.suite.ProtocolSuite
 import org.layeredencryption.suite.Suite1
+import org.layeredencryption.suite.SuiteId
+import org.layeredencryption.suite.SuiteRegistry
+import org.layeredencryption.suite.SuiteResolver
 
 /**
- * A device's long-term identity (Async_Invites_Spec.md §3).
+ * A device's long-term identity (Async_Invites_Spec.md §3) — self-describing since the
+ * pre-release format consolidation: the wire form names its own format version and the
+ * cryptographic suite that minted it, and every field is sized by that suite.
  *
- * Every device carries **three** long-term keypairs: a [HybridSignature] signing key (membership-log
- * signatures, LAN challenges), an X25519 identity key (`ik`) used for the async invite's `dh1`
- * identity binding, and an [XWing] key that others encapsulate to when they need to hand this
- * device a secret. All are bound to the signing key at generation by one binding signature, so the
- * parts cannot be mixed and matched:
+ * Every device carries **three** long-term keypairs: a signing key (membership-log signatures,
+ * LAN challenges), an X25519 identity key (`ik`) used for the async invite's `dh1` identity
+ * binding, and a KEM key that others encapsulate to when they need to hand this device a secret.
+ * All are bound to the signing key at generation by one binding signature, so the parts cannot
+ * be mixed and matched:
  *
  * ```
- * DeviceIdentity = framed( signing_pk(1984) ‖ x25519_ik_pk(32) ‖ xwing_pk(1216) ‖ bindingSig(3373) )
- * bindingSig     = Hybrid_signing over framed("<vendor>/v3/device-identity"
- *                                             ‖ signing_pk ‖ x25519_ik_pk ‖ xwing_pk)
+ * DeviceIdentity = framed( formatVersion(1)=0x02 ‖ suiteId(2 BE)
+ *                          ‖ signing_pk ‖ x25519_ik_pk(32) ‖ kem_pk ‖ bindingSig )
+ * bindingSig     = suite signing over framed("<vendor>/v4/device-identity"
+ *                                            ‖ formatVersion ‖ suiteId
+ *                                            ‖ signing_pk ‖ x25519_ik_pk ‖ kem_pk)
  * ```
  *
  * ### Why the binding message covers the signing key itself
@@ -31,23 +37,21 @@ import org.layeredencryption.suite.Suite1
  * the signing key, they take an honest device's identity, splice in an ML-DSA public key of their
  * own, forge the classical leg of the binding signature, and produce the post-quantum leg
  * legitimately — because the substituted key is theirs. The tampered identity verifies, and the
- * post-quantum leg has protected nothing at all. Signing the complete key set closes it: the
- * binding attests that this exact `(signing_pk, x25519_ik_pk)` pair belongs together, so altering
- * either one invalidates it.
+ * post-quantum leg has protected nothing at all. Signing the complete key set closes it; the
+ * format version and suite id are covered too, so none of them can be spliced either.
  *
- * ### Why an X-Wing key lives here
- * Rotating the context key requires handing the new one to every remaining member, and once pairing
- * is over there is no shared per-pair key left to wrap it with. A long-term KEM key in the identity
- * is what makes that possible, and making it hybrid is what stops a recorded rotation being the one
- * classical hole left in the protocol.
+ * ### Why the suite id is first-class
+ * An identity is an artifact of the suite that minted it: [verifyBinding] verifies under the
+ * identity's **own** suite, whatever era the carrying context is in. Adopting a new suite means
+ * fresh suite-appropriate keys plus a [KeyTransition] for continuity — never a reinterpretation
+ * of old bytes.
  *
- * This is *the* device certificate everywhere — live handshake transcripts, membership entries
+ * This is *the* device certificate everywhere — pairing transcripts, membership entries
  * (genesis included), and async bundles — so all of them carry the same authenticated bytes.
- *
- * The private halves live in [DeviceKeys]; only the public [DeviceIdentity] is ever serialised onto
- * the wire or into the log.
+ * The private halves live in [DeviceKeys]; only the public identity is ever serialised.
  */
 class DeviceIdentity(
+    val suiteId: SuiteId,
     signingPublicKey: ByteArray,
     x25519IdentityPublicKey: ByteArray,
     xWingPublicKey: ByteArray,
@@ -69,66 +73,92 @@ class DeviceIdentity(
 
     /** Canonical, length-framed serialisation — the exact bytes that appear on the wire and in logs. */
     fun serialise(): ByteArray = FrameWriter()
+        .putBytes(byteArrayOf(FORMAT_VERSION.toByte()))
+        .putBytes(suiteId.toWireBytes())
         .putBytes(_signingPublicKey)
         .putBytes(_x25519IdentityPublicKey)
         .putBytes(_xWingPublicKey)
         .putBytes(_bindingSignature)
         .toByteArray()
 
-    /** Verifies the X25519↔signing-key binding, requiring both signature legs to pass. */
-    fun verifyBinding(provider: CryptoProvider, namespace: ProtocolNamespace = ProtocolNamespace.Default): Boolean =
-        Suite1.signature.verify(
-            provider,
-            _signingPublicKey,
-            bindingMessage(_signingPublicKey, _x25519IdentityPublicKey, _xWingPublicKey, namespace),
-            _bindingSignature,
-        )
+    /** Verifies the binding under the identity's own suite, requiring every signature leg to pass. */
+    fun verifyBinding(
+        provider: CryptoProvider,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
+    ): Boolean = resolver.require(suiteId).signature.verify(
+        provider,
+        _signingPublicKey,
+        bindingMessage(suiteId, _signingPublicKey, _x25519IdentityPublicKey, _xWingPublicKey, namespace),
+        _bindingSignature,
+    )
 
     companion object {
-        private const val BINDING_SUFFIX = ProtocolLabels.DEVICE_IDENTITY
+        const val FORMAT_VERSION = 2
 
+        private const val BINDING_SUFFIX = ProtocolLabels.DEVICE_IDENTITY_SUITED
+        private const val VERSION_BYTES = 1
+        private const val SUITE_ID_BYTES = 2
         private const val X25519_KEY_SIZE = 32
         private const val LENGTH_PREFIX = 4
 
-        /** The one legal serialised size: four length-prefixed fixed-width fields. */
-        internal const val SERIALISED_SIZE =
-            LENGTH_PREFIX + HybridSignature.PUBLIC_KEY_SIZE +
+        /**
+         * A generous carrier bound for one serialised identity blob: real sizes are a few
+         * kilobytes per suite, and a variable-size field needs *some* pre-parse budget.
+         */
+        const val MAX_SERIALISED_BYTES = 64 * 1024
+
+        /** The one legal serialised size for an identity of [suite] — every field is fixed-width. */
+        fun serialisedSize(suite: ProtocolSuite): Int =
+            LENGTH_PREFIX + VERSION_BYTES +
+                LENGTH_PREFIX + SUITE_ID_BYTES +
+                LENGTH_PREFIX + suite.signature.publicKeySize +
                 LENGTH_PREFIX + X25519_KEY_SIZE +
-                LENGTH_PREFIX + XWing.PUBLIC_KEY_SIZE +
-                LENGTH_PREFIX + HybridSignature.SIGNATURE_SIZE
+                LENGTH_PREFIX + suite.kem.publicKeySize +
+                LENGTH_PREFIX + suite.signature.signatureSize
 
         /**
-         * Strict: every field has exactly one legal length (the format has no variability at
-         * all — see the class doc's byte layout), so the total is checked first, before any
-         * copies, and the frame must be fully consumed.
+         * Strict: the format version is gated first, then the suite must resolve (an identity
+         * under a suite this build does not know is unreadable by design, never guessed at),
+         * then every field at its exact per-suite size, then full consumption. Every failure is
+         * an [IllegalArgumentException].
          */
-        fun deserialise(bytes: ByteArray): DeviceIdentity {
-            require(bytes.size == SERIALISED_SIZE) { "A device identity is exactly $SERIALISED_SIZE bytes, was ${bytes.size}" }
+        fun deserialise(bytes: ByteArray, resolver: SuiteResolver = SuiteRegistry): DeviceIdentity {
             val reader = FrameReader(bytes)
-            val identity = deserialise(reader)
-            reader.expectEnd()
-            return identity
-        }
-
-        internal fun deserialise(reader: FrameReader): DeviceIdentity {
-            val signingPublicKey = reader.readBytes(HybridSignature.PUBLIC_KEY_SIZE)
-            require(signingPublicKey.size == HybridSignature.PUBLIC_KEY_SIZE) { "Signing key has wrong size" }
+            val version = reader.readBytes(VERSION_BYTES)
+            require(version.size == VERSION_BYTES && version[0].toInt() == FORMAT_VERSION) {
+                "Unsupported identity format version"
+            }
+            val suiteBytes = reader.readBytes(SUITE_ID_BYTES)
+            require(suiteBytes.size == SUITE_ID_BYTES) { "Suite id must be $SUITE_ID_BYTES bytes" }
+            val suiteId = SuiteId((((suiteBytes[0].toInt() and 0xFF) shl 8) or (suiteBytes[1].toInt() and 0xFF)).toUShort())
+            require(resolver.contains(suiteId)) { "Unknown suite ${suiteId.value}" }
+            val suite = resolver.require(suiteId)
+            require(bytes.size == serialisedSize(suite)) {
+                "A suite-${suiteId.value} identity is exactly ${serialisedSize(suite)} bytes, was ${bytes.size}"
+            }
+            val signingPublicKey = reader.readBytes(suite.signature.publicKeySize)
+            require(signingPublicKey.size == suite.signature.publicKeySize) { "Signing key has wrong size" }
             val x25519IdentityPublicKey = reader.readBytes(X25519_KEY_SIZE)
             require(x25519IdentityPublicKey.size == X25519_KEY_SIZE) { "X25519 identity key has wrong size" }
-            val xWingPublicKey = reader.readBytes(XWing.PUBLIC_KEY_SIZE)
-            require(xWingPublicKey.size == XWing.PUBLIC_KEY_SIZE) { "X-Wing key has wrong size" }
-            val bindingSignature = reader.readBytes(HybridSignature.SIGNATURE_SIZE)
-            require(bindingSignature.size == HybridSignature.SIGNATURE_SIZE) { "Binding signature has wrong size" }
-            return DeviceIdentity(signingPublicKey, x25519IdentityPublicKey, xWingPublicKey, bindingSignature)
+            val xWingPublicKey = reader.readBytes(suite.kem.publicKeySize)
+            require(xWingPublicKey.size == suite.kem.publicKeySize) { "KEM key has wrong size" }
+            val bindingSignature = reader.readBytes(suite.signature.signatureSize)
+            require(bindingSignature.size == suite.signature.signatureSize) { "Binding signature has wrong size" }
+            reader.expectEnd()
+            return DeviceIdentity(suiteId, signingPublicKey, x25519IdentityPublicKey, xWingPublicKey, bindingSignature)
         }
 
         internal fun bindingMessage(
+            suiteId: SuiteId,
             signingPublicKey: ByteArray,
             x25519IdentityPublicKey: ByteArray,
             xWingPublicKey: ByteArray,
             namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): ByteArray = FrameWriter()
             .putBytes(namespace.label(BINDING_SUFFIX))
+            .putBytes(byteArrayOf(FORMAT_VERSION.toByte()))
+            .putBytes(suiteId.toWireBytes())
             .putBytes(signingPublicKey)
             .putBytes(x25519IdentityPublicKey)
             .putBytes(xWingPublicKey)
@@ -137,9 +167,9 @@ class DeviceIdentity(
 }
 
 /**
- * A device's full identity — the public [DeviceIdentity] plus the private key halves needed to sign
- * ([HybridSignature]) and to run `dh1` (X25519). Never serialised; the private material stays on the
- * device (hardware-wrapped at rest per design §4.6, deferred).
+ * A device's full identity — the public [DeviceIdentity] plus the private key halves needed to
+ * sign and to run `dh1` (X25519). Never serialised; the private material stays on the device
+ * (hardware-wrapped at rest per design §4.6, deferred).
  */
 class DeviceKeys(
     val identity: DeviceIdentity,
@@ -160,7 +190,7 @@ class DeviceKeys(
     /** Opens what others encapsulate to [DeviceIdentity.xWingPublicKey]. */
     val xWingPrivateKey: ByteArray get() = guarded(_xWingPrivateKey)
 
-    /** The hybrid signing keypair, in the [KeyPair] shape the membership log expects. */
+    /** The signing keypair, in the [KeyPair] shape the membership log expects. */
     val signingKeyPair: KeyPair get() = KeyPair(identity.signingPublicKey, guarded(_signingPrivateKey))
 
     /**
@@ -184,7 +214,8 @@ class DeviceKeys(
 
     companion object {
         /**
-         * Generates a fresh device identity: hybrid signing + X25519 keypairs bound by a signature.
+         * Generates a fresh device identity under [suite]: suite-appropriate signing and KEM
+         * keypairs plus the X25519 identity key, bound by one signature at generation.
          *
          * The binding signature is domain-separated by [namespace] (LEP-10): an identity generated
          * for one application does not verify under another's namespace, so identities cannot be
@@ -193,18 +224,20 @@ class DeviceKeys(
          */
         fun generate(
             provider: CryptoProvider,
+            suite: ProtocolSuite = Suite1,
             namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): DeviceKeys {
-            val signing = Suite1.signature.generateKeyPair(provider)
+            val signing = suite.signature.generateKeyPair(provider)
             val identityDh = provider.x25519GenerateKeyPair()
-            val kem = Suite1.kem.generateKeyPair(provider)
-            val bindingSignature = Suite1.signature.sign(
+            val kem = suite.kem.generateKeyPair(provider)
+            val bindingSignature = suite.signature.sign(
                 provider,
                 signing.privateKey,
-                DeviceIdentity.bindingMessage(signing.publicKey, identityDh.publicKey, kem.publicKey, namespace),
+                DeviceIdentity.bindingMessage(suite.id, signing.publicKey, identityDh.publicKey, kem.publicKey, namespace),
             )
             return DeviceKeys(
                 identity = DeviceIdentity(
+                    suiteId = suite.id,
                     signingPublicKey = signing.publicKey,
                     x25519IdentityPublicKey = identityDh.publicKey,
                     xWingPublicKey = kem.publicKey,

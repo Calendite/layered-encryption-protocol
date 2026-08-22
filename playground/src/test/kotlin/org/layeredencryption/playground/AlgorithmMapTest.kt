@@ -31,7 +31,7 @@ class AlgorithmMapTest {
             counter, EpochKeys.founding(masterKey), "context", "device-00112233445566aa", 0, plaintext,
             namespace = namespace,
         )
-        val opened = LaneEnvelope.deserialise(envelope.serialise()).open(counter, EpochKeys.founding(masterKey), namespace)
+        val opened = LaneEnvelope.deserialise(envelope.serialise()).openWithoutReplayProtection(counter, EpochKeys.founding(masterKey), namespace)
 
         assertContentEquals(plaintext, opened)
         assertEquals(0, counter.signatures, "the message path signed something")

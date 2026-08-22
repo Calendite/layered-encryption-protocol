@@ -262,7 +262,7 @@ class Suite1FixtureGenerator {
     }
 
     private companion object {
-        const val SEED = "lep-suite1-fixtures-v1"
+        const val SEED = "lep-suite1-fixtures-v2"
         const val ENVELOPE_CONTEXT = "ctx-suite1-fixture"
         const val ENVELOPE_LANE = "device-1"
         const val ENVELOPE_SEQ = 7

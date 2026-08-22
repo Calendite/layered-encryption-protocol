@@ -262,7 +262,7 @@ private fun sendMessage(session: Session, text: String, tamper: Boolean) {
         hex = arrived.toHexString(),
     )
 
-    val opened = runCatching { LaneEnvelope.deserialise(arrived).open(provider, session.keys, namespace) }
+    val opened = runCatching { LaneEnvelope.deserialise(arrived).openWithoutReplayProtection(provider, session.keys, namespace) }
     opened.onSuccess { bytes ->
         events.lastVerdict = "delivered"
         events.lastDelivered = true

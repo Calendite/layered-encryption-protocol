@@ -1,7 +1,6 @@
 package org.layeredencryption
 
 import org.layeredencryption.identity.DeviceKeys
-import org.layeredencryption.identity.DeviceKeysV2
 import org.layeredencryption.invite.AsyncRendezvous
 import org.layeredencryption.invite.InviteBundleV2
 import org.layeredencryption.invite.InviteLink
@@ -27,7 +26,7 @@ class InviteV2Test {
     private val fake = FakeSuites.fakeSuite()
     private val resolver = FakeSuites.resolverWith(fake)
 
-    private val inviterKeys = DeviceKeysV2.generate(provider, fake)
+    private val inviterKeys = DeviceKeys.generate(provider, fake)
     private val secret = provider.randomBytes(InviteLink.SECRET_SIZE)
     private val ridAsync = AsyncRendezvous.id(provider, secret)
 
@@ -142,7 +141,7 @@ class InviteV2Test {
         // downgrades the bundle's suite (here: an otherwise-valid bundle from a Suite 1 v2
         // identity) is caught by the equality check every A3 joiner performs.
         val link = InviteLink.createSuited(provider, secret, inviterKeys.identity)
-        val suite1Inviter = DeviceKeysV2.generate(provider, org.layeredencryption.suite.Suite1)
+        val suite1Inviter = DeviceKeys.generate(provider, org.layeredencryption.suite.Suite1)
         val downgraded = InviteBundleV2.build(
             provider, XWing.generateKeyPair(provider).publicKey, suite1Inviter,
             expiryEpochSeconds = 1_924_992_000L, ridAsync = ridAsync, resolver = resolver,

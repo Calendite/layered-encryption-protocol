@@ -45,14 +45,6 @@ internal object ProtocolLabels {
     const val CODE_SECRET = "v1/code-secret"
 
     /**
-     * Device identity binding signature.
-     *
-     * v2: the signature became hybrid Ed25519 + ML-DSA-65, and the signed message grew to cover the
-     * signing public key as well as the X25519 identity key.
-     */
-    const val DEVICE_IDENTITY = "v3/device-identity"
-
-    /**
      * Wrapping a context key for one member's device identity.
      *
      * New in v3, and the reason the identity format changed. Rotating the master key means handing
@@ -121,8 +113,8 @@ internal object ProtocolLabels {
      * Version 2 (suited) device-identity binding signature.
      *
      * v4 of the identity-binding family: the signed message grew a format version and the binary
-     * suite id, and the signature verifies under the identity's own suite. [DEVICE_IDENTITY]
-     * stays frozen for v1 identities, which remain Suite 1 artifacts forever.
+     * suite id, and the signature verifies under the identity's own suite. (The pre-release
+     * "v3/device-identity" label was pruned with the legacy identity format it bound.)
      */
     const val DEVICE_IDENTITY_SUITED = "v4/device-identity"
 
@@ -156,7 +148,7 @@ internal object ProtocolLabels {
 
     /** The complete set, for the freeze test to compare against. */
     val ALL: Set<String> = setOf(
-        LAYER_CHACHA, LAYER_AES, TRANSCRIPT, PAIRING, CODE_SECRET, SAS_COMMITMENT, DEVICE_IDENTITY,
+        LAYER_CHACHA, LAYER_AES, TRANSCRIPT, PAIRING, CODE_SECRET, SAS_COMMITMENT,
         MEMBER_KEY_WRAP,
         MEMBERSHIP, INVITE_BUNDLE, TRANSCRIPT_ASYNC, PAIRING_ASYNC, ASYNC_LINK_AUTH, RENDEZVOUS,
         RENDEZVOUS_ASYNC, CONTEXT_ID,

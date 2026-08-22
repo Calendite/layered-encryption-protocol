@@ -46,7 +46,7 @@ class ImmutabilityTest {
         val x25519 = identity.x25519IdentityPublicKey
         val xwing = identity.xWingPublicKey
         val binding = identity.bindingSignature
-        val rebuilt = DeviceIdentity(signing, x25519, xwing, binding)
+        val rebuilt = DeviceIdentity(identity.suiteId, signing, x25519, xwing, binding)
         val rebuiltBytes = rebuilt.serialise()
         signing.fill(1); x25519.fill(1); xwing.fill(1); binding.fill(1)
         assertContentEquals(rebuiltBytes, rebuilt.serialise())

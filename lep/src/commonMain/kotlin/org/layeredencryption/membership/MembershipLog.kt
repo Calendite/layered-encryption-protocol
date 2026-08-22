@@ -197,11 +197,20 @@ class MembershipEntry(
         private const val SUFFIX = ProtocolLabels.MEMBERSHIP
         private val EMPTY = ByteArray(0)
 
-        internal fun deserialise(reader: FrameReader): MembershipEntry {
+        /**
+         * Parses one entry. The identity field is self-describing (its own version, suite, and
+         * sizes); the signer key and signature are sized by [era] — the suite of the era the
+         * entry sits in, tracked by the log-level walk, because entries are signed under the
+         * era's suite, not the subject identity's. A null [era] is the genesis entry, whose
+         * own identity *defines* the founding era (the genesis self-signs the founder, so its
+         * signer suite is its identity's).
+         */
+        internal fun deserialise(reader: FrameReader, resolver: SuiteResolver, era: ProtocolSuite?): MembershipEntry {
             val previousHash = reader.readBytes(GENESIS_PREVIOUS_HASH.size)
             require(previousHash.size == GENESIS_PREVIOUS_HASH.size) { "previousHash must be a SHA-256 hash" }
             val op = MembershipOp.fromCode(reader.readByte())
-            val deviceIdentity = DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.SERIALISED_SIZE))
+            val deviceIdentity = DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.MAX_SERIALISED_BYTES), resolver)
+            val signerSuite = era ?: resolver.require(deviceIdentity.suiteId)
             val wrappedBytes = reader.readBytes(ProtocolLimits.MAX_WRAPPED_KEYS_BYTES)
             val wrappedFlag = reader.readByte()
             // A canonical flag, strictly: any other byte, or absent-but-nonempty, would let two
@@ -209,10 +218,10 @@ class MembershipEntry(
             // byte-compared paths (prefix comparison, hashes).
             require(wrappedFlag == 0 || wrappedFlag == 1) { "wrappedKeys flag must be 0 or 1" }
             require(wrappedFlag == 1 || wrappedBytes.isEmpty()) { "Absent wrappedKeys must be empty" }
-            val signerPublicKey = reader.readBytes(HybridSignature.PUBLIC_KEY_SIZE)
-            require(signerPublicKey.size == HybridSignature.PUBLIC_KEY_SIZE) { "Signer key has wrong size" }
-            val signature = reader.readBytes(HybridSignature.SIGNATURE_SIZE)
-            require(signature.size == HybridSignature.SIGNATURE_SIZE) { "Signature has wrong size" }
+            val signerPublicKey = reader.readBytes(signerSuite.signature.publicKeySize)
+            require(signerPublicKey.size == signerSuite.signature.publicKeySize) { "Signer key has wrong size" }
+            val signature = reader.readBytes(signerSuite.signature.signatureSize)
+            require(signature.size == signerSuite.signature.signatureSize) { "Signature has wrong size" }
             return MembershipEntry(
                 previousHash = previousHash,
                 op = op,
@@ -420,7 +429,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         resolver: SuiteResolver = SuiteRegistry,
     ): List<ByteArray> {
         val keys = mutableListOf<ByteArray>()
-        var era = resolver.require(SuiteId.LEP_HYBRID_2026)
+        var era = resolver.require(entriesSnapshot.first().deviceIdentity.suiteId)
         for (entry in entriesSnapshot) {
             when (entry.op) {
                 MembershipOp.REVOKE, MembershipOp.ROTATE ->
@@ -713,21 +722,27 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         val members = mutableSetOf<String>()
         var expectedPrevious = MembershipEntry.GENESIS_PREVIOUS_HASH
         var inKeylessBatch = false
-        // Every context is founded under Suite 1 (a genesis suite declaration belongs to the
-        // versioned entry format of a later phase); SUITE_UPGRADE entries move the era forward,
-        // and each historical entry verifies under the suite that was active when it was made.
-        var activeSuite = resolver.require(SuiteId.LEP_HYBRID_2026)
+        // The genesis identity defines the founding suite — a context can be founded under any
+        // registered suite. SUITE_UPGRADE entries move the era forward, and each historical
+        // entry verifies under the suite that was active when it was made.
+        val foundingSuiteId = entriesSnapshot.first().deviceIdentity.suiteId
+        if (!resolver.contains(foundingSuiteId)) {
+            return MembershipVerification.Invalid("Unknown founding suite ${foundingSuiteId.value}", 0)
+        }
+        var activeSuite = resolver.require(foundingSuiteId)
         var epoch = 0
 
         entriesSnapshot.forEachIndexed { index, entry ->
             if (!entry.previousHash.contentEquals(expectedPrevious)) {
                 return MembershipVerification.Invalid("Broken hash chain", index)
             }
-            // Identity bindings are artifacts of identity *creation*, and every current-format
-            // identity is a Suite 1 artifact — bindings stay under Suite 1 until versioned
-            // identities and KeyTransitions exist. Entry signatures are live per-era operations
-            // and route through the active suite.
-            if (!entry.deviceIdentity.verifyBinding(provider, namespace)) {
+            // Identity bindings are artifacts of identity *creation* and verify under the
+            // identity's own (self-described) suite; entry signatures are live per-era
+            // operations and route through the active suite.
+            if (!resolver.contains(entry.deviceIdentity.suiteId)) {
+                return MembershipVerification.Invalid("Unknown identity suite ${entry.deviceIdentity.suiteId.value}", index)
+            }
+            if (!entry.deviceIdentity.verifyBinding(provider, namespace, resolver)) {
                 return MembershipVerification.Invalid("Invalid device-identity binding", index)
             }
             if (!activeSuite.signature.verify(provider, entry.signerPublicKey, entry.unsignedBytes(namespace), entry.signature)) {
@@ -900,12 +915,13 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
     private fun epochCount(): Int = entriesSnapshot.count { advancesEpoch(it) }
 
     /**
-     * The suite of the log's current era: Suite 1 until a SUITE_UPGRADE, then that entry's
-     * target. Builder-side only — verification tracks the era through its own validated walk.
-     * Throws on a corrupt upgrade entry or an unknown target: builders must not guess.
+     * The suite of the log's current era: the genesis identity's suite until a SUITE_UPGRADE,
+     * then that entry's target. Builder-side only — verification tracks the era through its own
+     * validated walk. Throws on a corrupt upgrade entry or an unknown target: builders must
+     * not guess.
      */
     private fun currentEraSuite(resolver: SuiteResolver): ProtocolSuite {
-        var suite = resolver.require(SuiteId.LEP_HYBRID_2026)
+        var suite = resolver.require(entriesSnapshot.first().deviceIdentity.suiteId)
         for (entry in entriesSnapshot) {
             if (entry.op != MembershipOp.SUITE_UPGRADE) continue
             val payload = entry.wrappedKeys?.let { SuiteUpgradePayload.parse(it) }
@@ -927,7 +943,7 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         resolver: SuiteResolver = SuiteRegistry,
     ): SuiteSchedule? {
         if (verify(provider, namespace, resolver) !is MembershipVerification.Valid) return null
-        val eras = mutableListOf(SuiteSchedule.Era(0, SuiteId.LEP_HYBRID_2026))
+        val eras = mutableListOf(SuiteSchedule.Era(0, entriesSnapshot.first().deviceIdentity.suiteId))
         var epoch = 0
         for (entry in entriesSnapshot) {
             if (entry.op == MembershipOp.SUITE_UPGRADE) {
@@ -954,18 +970,30 @@ class MembershipLog private constructor(entries: List<MembershipEntry>) {
         /** Far beyond any real device list; the bound is what stops 16 MB of confetti becoming 16 MB of list. */
         private const val MAX_ENTRIES = 10_000
 
-        fun deserialise(data: ByteArray): MembershipLog {
+        fun deserialise(data: ByteArray, resolver: SuiteResolver = SuiteRegistry): MembershipLog {
             require(data.size <= ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES) {
                 "Membership log of ${data.size} bytes exceeds the ${ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES}-byte limit"
             }
             val reader = FrameReader(data)
             val entries = mutableListOf<MembershipEntry>()
+            // The parse walks eras structurally, mirroring verify(): the genesis identity
+            // defines the founding suite, and each SUITE_UPGRADE payload moves it — so signer
+            // keys and signatures keep exact per-era size checks even though identities are
+            // variable-size and self-describing.
+            var era: ProtocolSuite? = null
             while (reader.hasRemaining()) {
                 require(entries.size < MAX_ENTRIES) { "Membership log exceeds $MAX_ENTRIES entries" }
                 val entryReader = FrameReader(reader.readBytes())
-                val entry = MembershipEntry.deserialise(entryReader)
+                val entry = MembershipEntry.deserialise(entryReader, resolver, era)
                 entryReader.expectEnd()
                 entries.add(entry)
+                if (era == null) era = resolver.require(entry.deviceIdentity.suiteId)
+                if (entry.op == MembershipOp.SUITE_UPGRADE) {
+                    val payload = entry.wrappedKeys?.let { SuiteUpgradePayload.parse(it) }
+                        ?: throw IllegalArgumentException("Suite upgrade carries a malformed payload")
+                    require(resolver.contains(payload.newSuite)) { "Unknown suite ${payload.newSuite.value}" }
+                    era = resolver.require(payload.newSuite)
+                }
             }
             return MembershipLog(entries)
         }

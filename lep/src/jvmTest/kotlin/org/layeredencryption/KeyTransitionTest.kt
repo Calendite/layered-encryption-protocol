@@ -1,8 +1,7 @@
 package org.layeredencryption
 
-import org.layeredencryption.identity.DeviceIdentityV2
+import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.identity.DeviceKeys
-import org.layeredencryption.identity.DeviceKeysV2
 import org.layeredencryption.identity.KeyTransition
 import org.layeredencryption.suite.FakeSuites
 import org.layeredencryption.suite.Suite1
@@ -25,7 +24,7 @@ class KeyTransitionTest {
     private val resolver = FakeSuites.resolverWith(fake)
 
     private val oldKeys = DeviceKeys.generate(provider)
-    private val newKeys = DeviceKeysV2.generate(provider, fake)
+    private val newKeys = DeviceKeys.generate(provider, fake)
 
     @Test
     fun transition_verifiesAndRoundTripsByteExactly() {
@@ -39,18 +38,18 @@ class KeyTransitionTest {
     }
 
     @Test
-    fun formatMigrationTransition_underSuite1_verifies() {
-        // The same underlying keys, re-bound in v2 form: continuity across the format migration
-        // is provable with the production registry alone.
-        val rebound = DeviceKeysV2.rebind(provider, oldKeys, Suite1)
-        val transition = KeyTransition.create(provider, oldKeys, rebound)
+    fun sameSuiteTransition_isIdentityRekeying() {
+        // A fresh successor under the same suite: continuity for identity re-keying, provable
+        // with the production registry alone.
+        val successor = DeviceKeys.generate(provider)
+        val transition = KeyTransition.create(provider, oldKeys, successor)
         assertTrue(transition.verify(provider))
     }
 
     @Test
     fun swappedSuccessorIdentity_failsBothWays() {
         val transition = KeyTransition.create(provider, oldKeys, newKeys, resolver = resolver)
-        val impostor = DeviceKeysV2.generate(provider, fake)
+        val impostor = DeviceKeys.generate(provider, fake)
 
         // Splicing a different successor under the honest signatures: the signed message names
         // the real successor, so both legs fail over the spliced one.
@@ -98,7 +97,7 @@ class KeyTransitionTest {
     fun brokenSuccessorBinding_fails() {
         // A successor whose own binding does not verify is rejected before the transition
         // signatures are even considered.
-        val tamperedIdentity = DeviceIdentityV2(
+        val tamperedIdentity = DeviceIdentity(
             newKeys.identity.suiteId,
             newKeys.identity.signingPublicKey,
             newKeys.identity.x25519IdentityPublicKey,

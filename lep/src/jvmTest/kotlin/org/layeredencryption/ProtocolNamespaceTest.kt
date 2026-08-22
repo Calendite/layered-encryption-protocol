@@ -39,7 +39,6 @@ class ProtocolNamespaceTest {
         "v1/pairing" to "calendite/v1/pairing",
         "v1/code-secret" to "calendite/v1/code-secret",
         "v2/sas-commitment" to "calendite/v2/sas-commitment",
-        "v3/device-identity" to "calendite/v3/device-identity",
         "v1/member-key-wrap" to "calendite/v1/member-key-wrap",
         "v2/membership" to "calendite/v2/membership",
         "v2/invite-bundle" to "calendite/v2/invite-bundle",

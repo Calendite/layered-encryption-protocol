@@ -6,6 +6,7 @@ import org.layeredencryption.ProtocolLimits
 import org.layeredencryption.XWing
 import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.membership.MembershipLog
+import org.layeredencryption.suite.Suite1
 import org.layeredencryption.suite.SuiteId
 
 /**
@@ -36,13 +37,17 @@ object PairingWire {
     // Every ceremony message except InviterComplete has exactly one legal size (LEP-09 retest,
     // issue 9.2): all fields are fixed-width, so both the total and each field are checked, and
     // a frame that trades bytes between fields while keeping the total is still rejected.
-    private const val INVITER_HELLO_BYTES = TAG_BYTES +
+    // Identity sizes are per-suite runtime values now (identities are self-describing); the
+    // ceremony currently sizes its frames for Suite 1 until the decoders take the negotiated
+    // suite explicitly.
+    private val IDENTITY_BYTES = DeviceIdentity.serialisedSize(Suite1)
+    private val INVITER_HELLO_BYTES = TAG_BYTES +
         LENGTH_PREFIX + XWing.PUBLIC_KEY_SIZE +
-        LENGTH_PREFIX + DeviceIdentity.SERIALISED_SIZE +
+        LENGTH_PREFIX + IDENTITY_BYTES +
         LENGTH_PREFIX + SAS_COMMITMENT_BYTES
-    private const val JOINER_RESPONSE_BYTES = TAG_BYTES +
+    private val JOINER_RESPONSE_BYTES = TAG_BYTES +
         LENGTH_PREFIX + XWing.CIPHERTEXT_SIZE +
-        LENGTH_PREFIX + DeviceIdentity.SERIALISED_SIZE +
+        LENGTH_PREFIX + IDENTITY_BYTES +
         LENGTH_PREFIX + MAC_BYTES
     private const val INVITER_CONFIRM_BYTES = TAG_BYTES +
         LENGTH_PREFIX + MAC_BYTES +
@@ -77,7 +82,7 @@ object PairingWire {
     fun decodeInviterHello(frame: ByteArray): InviterHello = expect(frame, TAG_INVITER_HELLO, exactBytes = INVITER_HELLO_BYTES) { reader ->
         InviterHello(
             sized(reader.readBytes(XWing.PUBLIC_KEY_SIZE), XWing.PUBLIC_KEY_SIZE),
-            DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.SERIALISED_SIZE)),
+            DeviceIdentity.deserialise(reader.readBytes(IDENTITY_BYTES)),
             sized(reader.readBytes(SAS_COMMITMENT_BYTES), SAS_COMMITMENT_BYTES),
         )
     }
@@ -92,7 +97,7 @@ object PairingWire {
     fun decodeJoinerResponse(frame: ByteArray): JoinerResponse = expect(frame, TAG_JOINER_RESPONSE, exactBytes = JOINER_RESPONSE_BYTES) { reader ->
         JoinerResponse(
             sized(reader.readBytes(XWing.CIPHERTEXT_SIZE), XWing.CIPHERTEXT_SIZE),
-            DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.SERIALISED_SIZE)),
+            DeviceIdentity.deserialise(reader.readBytes(IDENTITY_BYTES)),
             sized(reader.readBytes(MAC_BYTES), MAC_BYTES),
         )
     }

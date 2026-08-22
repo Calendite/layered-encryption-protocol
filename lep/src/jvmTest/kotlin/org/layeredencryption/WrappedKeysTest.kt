@@ -107,6 +107,7 @@ class WrappedKeysTest {
         val attacker = DeviceKeys.generate(provider)
 
         val spliced = org.layeredencryption.identity.DeviceIdentity(
+            suiteId = honest.identity.suiteId,
             signingPublicKey = honest.identity.signingPublicKey,
             x25519IdentityPublicKey = honest.identity.x25519IdentityPublicKey,
             xWingPublicKey = attacker.identity.xWingPublicKey,

@@ -73,9 +73,9 @@ class InviteBundle(
         private const val LENGTH_PREFIX = 4
 
         /** The one legal serialised size: four length-prefixed fixed-width fields. */
-        internal const val SERIALISED_SIZE =
+        internal val SERIALISED_SIZE =
             LENGTH_PREFIX + XWing.PUBLIC_KEY_SIZE +
-                LENGTH_PREFIX + DeviceIdentity.SERIALISED_SIZE +
+                LENGTH_PREFIX + DeviceIdentity.serialisedSize(Suite1) +
                 LENGTH_PREFIX + 8 +
                 LENGTH_PREFIX + HybridSignature.SIGNATURE_SIZE
 
@@ -85,7 +85,7 @@ class InviteBundle(
             val reader = FrameReader(bytes)
             val inviteXWingPublicKey = reader.readBytes(XWing.PUBLIC_KEY_SIZE)
             require(inviteXWingPublicKey.size == XWing.PUBLIC_KEY_SIZE) { "Invite KEM key has wrong size" }
-            val deviceIdentityA = DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.SERIALISED_SIZE))
+            val deviceIdentityA = DeviceIdentity.deserialise(reader.readBytes(DeviceIdentity.serialisedSize(Suite1)))
             val expiry = bigEndian8ToLong(reader.readBytes(8))
             val signature = reader.readBytes(HybridSignature.SIGNATURE_SIZE)
             require(signature.size == HybridSignature.SIGNATURE_SIZE) { "Bundle signature has wrong size" }

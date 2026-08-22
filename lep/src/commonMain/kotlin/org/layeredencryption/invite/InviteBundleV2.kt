@@ -5,8 +5,8 @@ import org.layeredencryption.FrameReader
 import org.layeredencryption.FrameWriter
 import org.layeredencryption.ProtocolLabels
 import org.layeredencryption.ProtocolNamespace
-import org.layeredencryption.identity.DeviceIdentityV2
-import org.layeredencryption.identity.DeviceKeysV2
+import org.layeredencryption.identity.DeviceIdentity
+import org.layeredencryption.identity.DeviceKeys
 import org.layeredencryption.longToBigEndian8
 import org.layeredencryption.suite.SuiteId
 import org.layeredencryption.suite.SuiteRegistry
@@ -23,7 +23,7 @@ import org.layeredencryption.suite.SuiteResolver
  *                                  ‖ rid_async ‖ expiry ‖ inviteKemPublicKey ‖ deviceIdentityA)
  * ```
  *
- * The inviter's identity is a [DeviceIdentityV2] whose suite MUST equal the bundle's — enforced
+ * The inviter's identity is a [DeviceIdentity] whose suite MUST equal the bundle's — enforced
  * at construction, so no decoded or built bundle can ever disagree with itself. The signature
  * covers the format version, the suite, the recipient-relevant material, and the expiry, and it
  * verifies under the bundle's suite. Parser assignment is by link version: an `A2` link fetches
@@ -33,7 +33,7 @@ import org.layeredencryption.suite.SuiteResolver
  */
 class InviteBundleV2(
     inviteXWingPublicKey: ByteArray,
-    val deviceIdentityA: DeviceIdentityV2,
+    val deviceIdentityA: DeviceIdentity,
     val expiryEpochSeconds: Long,
     signature: ByteArray,
 ) {
@@ -79,7 +79,7 @@ class InviteBundleV2(
         fun build(
             provider: CryptoProvider,
             inviteXWingPublicKey: ByteArray,
-            deviceKeysA: DeviceKeysV2,
+            deviceKeysA: DeviceKeys,
             expiryEpochSeconds: Long,
             ridAsync: ByteArray,
             namespace: ProtocolNamespace = ProtocolNamespace.Default,
@@ -117,8 +117,8 @@ class InviteBundleV2(
             val suite = resolver.require(suiteId)
             val inviteXWingPublicKey = reader.readBytes(suite.kem.publicKeySize)
             require(inviteXWingPublicKey.size == suite.kem.publicKeySize) { "Invite KEM key has wrong size" }
-            val deviceIdentityA = DeviceIdentityV2.deserialise(
-                reader.readBytes(DeviceIdentityV2.serialisedSize(suite)), resolver,
+            val deviceIdentityA = DeviceIdentity.deserialise(
+                reader.readBytes(DeviceIdentity.serialisedSize(suite)), resolver,
             )
             require(deviceIdentityA.suiteId == suiteId) { "Bundle and identity suites disagree" }
             val expiryBytes = reader.readBytes(EXPIRY_BYTES)
@@ -136,7 +136,7 @@ class InviteBundleV2(
             ridAsync: ByteArray,
             expiryEpochSeconds: Long,
             inviteXWingPublicKey: ByteArray,
-            deviceIdentityA: DeviceIdentityV2,
+            deviceIdentityA: DeviceIdentity,
             namespace: ProtocolNamespace = ProtocolNamespace.Default,
         ): ByteArray = FrameWriter()
             .putBytes(namespace.label(ProtocolLabels.INVITE_BUNDLE_SUITED))

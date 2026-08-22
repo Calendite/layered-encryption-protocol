@@ -2,7 +2,6 @@ package org.layeredencryption.invite
 
 import org.layeredencryption.CryptoProvider
 import org.layeredencryption.identity.DeviceIdentity
-import org.layeredencryption.identity.DeviceIdentityV2
 import org.layeredencryption.suite.SuiteId
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -75,22 +74,15 @@ class InviteLink(
             return InviteLink(secret, fingerprintOf(provider, inviterIdentity))
         }
 
-        /** Builds a suited `A3` link: the suite hint comes from the inviter's v2 identity. */
-        fun createSuited(provider: CryptoProvider, secret: ByteArray, inviterIdentity: DeviceIdentityV2): InviteLink {
+        /** Builds a suited `A3` link: the suite hint comes from the inviter's identity. */
+        fun createSuited(provider: CryptoProvider, secret: ByteArray, inviterIdentity: DeviceIdentity): InviteLink {
             require(secret.size == SECRET_SIZE) { "Invite secret must be $SECRET_SIZE bytes" }
             return InviteLink(secret, fingerprintOf(provider, inviterIdentity), inviterIdentity.suiteId)
         }
 
-        /** The 16-byte fingerprint of an identity: `SHA-256(ed25519_pk)[0..16]`. */
+        /** The 16-byte fingerprint of an identity: `SHA-256(signing_pk)[0..16]` — size-independent. */
         fun fingerprintOf(provider: CryptoProvider, identity: DeviceIdentity): ByteArray =
-            fingerprintOfKey(provider, identity.signingPublicKey)
-
-        /** The same fingerprint for a v2 identity — size-independent by construction. */
-        fun fingerprintOf(provider: CryptoProvider, identity: DeviceIdentityV2): ByteArray =
-            fingerprintOfKey(provider, identity.signingPublicKey)
-
-        private fun fingerprintOfKey(provider: CryptoProvider, signingPublicKey: ByteArray): ByteArray =
-            provider.sha256(signingPublicKey).copyOfRange(0, FINGERPRINT_SIZE)
+            provider.sha256(identity.signingPublicKey).copyOfRange(0, FINGERPRINT_SIZE)
 
         /**
          * Strictly parses a **bare** fragment payload, or returns `null` if malformed. Anything
