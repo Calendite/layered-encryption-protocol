@@ -8,6 +8,7 @@ import org.layeredencryption.invite.ResponseOutcome
 import org.layeredencryption.pairing.Inviter
 import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
+import org.layeredencryption.pairing.TestNegotiation
 import org.layeredencryption.pairing.PairingException
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -25,6 +26,8 @@ import kotlin.test.assertTrue
 class TransientSecretZeroisationTest {
 
     private val provider: CryptoProvider = BouncyCastleCryptoProvider()
+
+    private val negotiation = TestNegotiation.pair(provider)
     private val now = 1_000_000L
     private val expiry = now + 7 * 86_400L
 
@@ -111,8 +114,8 @@ class TransientSecretZeroisationTest {
     @Test
     fun syncInviterZeroesEverythingDerivedForAWrongCode() {
         val capturing = SecretCapturingProvider(provider)
-        val inviter = Inviter(capturing, DeviceKeys.generate(provider), PairingCode.generate(provider))
-        val joiner = Joiner(provider, DeviceKeys.generate(provider), PairingCode.generate(provider))
+        val inviter = Inviter(capturing, DeviceKeys.generate(provider), PairingCode.generate(provider), negotiated = negotiation.first)
+        val joiner = Joiner(provider, DeviceKeys.generate(provider), PairingCode.generate(provider), negotiated = negotiation.second)
 
         val response = joiner.onInviterHello(inviter.hello())
 

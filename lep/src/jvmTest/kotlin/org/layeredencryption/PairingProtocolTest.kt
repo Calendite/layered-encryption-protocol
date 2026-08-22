@@ -11,6 +11,7 @@ import org.layeredencryption.pairing.Handshake
 import org.layeredencryption.pairing.Inviter
 import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
+import org.layeredencryption.pairing.TestNegotiation
 import org.layeredencryption.pairing.PairingException
 import org.layeredencryption.pairing.PairingTranscript
 import org.layeredencryption.pairing.Rendezvous
@@ -24,6 +25,8 @@ import kotlin.test.assertTrue
 class PairingProtocolTest {
 
     private val provider: CryptoProvider = BouncyCastleCryptoProvider()
+
+    private val negotiation = TestNegotiation.pair(provider)
 
     // ── PairingCode (§6.1/§6.2) ───────────────────────────────────────────────────────────────
 
@@ -106,7 +109,7 @@ class PairingProtocolTest {
 
     @Test
     fun sas_isSixDigitsGroupedAndDeterministic() {
-        val transcript = PairingTranscript(byteArrayOf(1), byteArrayOf(2), byteArrayOf(3), byteArrayOf(4), byteArrayOf(5))
+        val transcript = PairingTranscript(byteArrayOf(1), byteArrayOf(2), byteArrayOf(3), byteArrayOf(4), byteArrayOf(5), negotiated = negotiation.first)
         val secret = ByteArray(32) { it.toByte() }
         val nonce = ByteArray(Handshake.SAS_NONCE_SIZE) { it.toByte() }
         val sas = Handshake.shortAuthString(provider, secret, transcript, nonce)
@@ -169,8 +172,8 @@ class PairingProtocolTest {
     @Test
     fun pairing_completesEndToEndWithSharedMasterKeyAndMatchingSas() {
         val code = PairingCode.generate(provider)
-        val inviter = Inviter(provider, DeviceKeys.generate(provider), code)
-        val joiner = Joiner(provider, DeviceKeys.generate(provider), code)
+        val inviter = Inviter(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.first)
+        val joiner = Joiner(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.second)
 
         val response = joiner.onInviterHello(inviter.hello())
         val confirm = inviter.onJoinerResponse(response)
@@ -190,8 +193,8 @@ class PairingProtocolTest {
 
     @Test
     fun pairing_wrongCodeFailsAtTheMac() {
-        val inviter = Inviter(provider, DeviceKeys.generate(provider), PairingCode.of("A".repeat(24)))
-        val joiner = Joiner(provider, DeviceKeys.generate(provider), PairingCode.of("Z".repeat(24)))
+        val inviter = Inviter(provider, DeviceKeys.generate(provider), PairingCode.of("A".repeat(24)), negotiated = negotiation.first)
+        val joiner = Joiner(provider, DeviceKeys.generate(provider), PairingCode.of("Z".repeat(24)), negotiated = negotiation.second)
 
         val response = joiner.onInviterHello(inviter.hello())
         // The joiner never knew the real code: its MAC cannot match, so pairing aborts.

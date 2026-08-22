@@ -4,6 +4,7 @@ import org.layeredencryption.identity.DeviceKeys
 import org.layeredencryption.pairing.Inviter
 import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
+import org.layeredencryption.pairing.TestNegotiation
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
@@ -17,6 +18,7 @@ import kotlin.test.assertTrue
 class ExceptionalPathZeroisationTest {
 
     private val plain: CryptoProvider = BouncyCastleCryptoProvider()
+    private val negotiation = TestNegotiation.pair(plain)
 
     /** Captures every secret-by-construction output; throws instead of performing op [throwAt]. */
     private class FaultInjectingProvider(
@@ -106,9 +108,9 @@ class ExceptionalPathZeroisationTest {
     fun syncInviterLeaksNothingWhereverTheProviderFails() {
         forEveryFault { provider ->
             val code = PairingCode.generate(plain)
-            val inviter = Inviter(provider, DeviceKeys.generate(plain), code)
+            val inviter = Inviter(provider, DeviceKeys.generate(plain), code, negotiated = negotiation.first)
             try {
-                val response = Joiner(plain, DeviceKeys.generate(plain), code).onInviterHello(inviter.hello())
+                val response = Joiner(plain, DeviceKeys.generate(plain), code, negotiated = negotiation.second).onInviterHello(inviter.hello())
                 inviter.onJoinerResponse(response)
             } finally {
                 inviter.destroy()
@@ -121,8 +123,8 @@ class ExceptionalPathZeroisationTest {
     fun syncJoinerLeaksNothingWhereverTheProviderFails() {
         forEveryFault { provider ->
             val code = PairingCode.generate(plain)
-            val inviter = Inviter(plain, DeviceKeys.generate(plain), code)
-            val joiner = Joiner(provider, DeviceKeys.generate(plain), code)
+            val inviter = Inviter(plain, DeviceKeys.generate(plain), code, negotiated = negotiation.first)
+            val joiner = Joiner(provider, DeviceKeys.generate(plain), code, negotiated = negotiation.second)
             try {
                 val response = joiner.onInviterHello(inviter.hello())
                 joiner.onInviterConfirm(inviter.onJoinerResponse(response))

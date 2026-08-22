@@ -188,6 +188,7 @@ class ImmutabilityTest {
         // The transcript that keys the MACs cannot be edited after the fact.
         val transcript = org.layeredencryption.pairing.PairingTranscript(
             provider.randomBytes(XWing.PUBLIC_KEY_SIZE), ByteArray(8), provider.randomBytes(XWing.CIPHERTEXT_SIZE), ByteArray(8), provider.randomBytes(32),
+            negotiated = org.layeredencryption.pairing.TestNegotiation.single(provider),
         )
         val canonical = transcript.bytes()
         transcript.inviterXWingPublicKey.fill(0)

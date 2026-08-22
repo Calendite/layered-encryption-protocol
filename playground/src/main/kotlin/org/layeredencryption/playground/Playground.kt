@@ -80,16 +80,15 @@ private fun pairTwoDevices(): Session {
     val inviterKeys = DeviceKeys.generate(provider)
     val joinerKeys = DeviceKeys.generate(provider)
 
-    lateinit var masterKey: ByteArray
-    lateinit var inviter: Inviter
+    lateinit var result: PairingFerry.PairingResult
     val inviterThread = thread {
         listener.accept().use { socket ->
             runBlocking {
                 // The library's own recorder decodes each frame, so the pairing section is
                 // described by the protocol rather than by this demo guessing.
-                masterKey = PairingFerry.runInviter(
+                result = PairingFerry.runInviter(
                     RecordingChannel(SocketChannel(socket, "A"), PairingRecorder(events), "inviter", provider),
-                    Inviter(provider, inviterKeys, code).also { inviter = it },
+                    provider, inviterKeys, code,
                     confirmSas = { sas ->
                         events.add("pairing", "A", "Short authentication string", "Device A shows $sas")
                         true
@@ -103,7 +102,7 @@ private fun pairTwoDevices(): Session {
         runBlocking {
             PairingFerry.runJoiner(
                 SocketChannel(socket, "B"),
-                Joiner(provider, joinerKeys, code),
+                provider, joinerKeys, code,
                 confirmSas = { sas ->
                     events.add("pairing", "B", "Short authentication string", "Device B shows $sas; both humans compare and confirm")
                     true
@@ -114,10 +113,10 @@ private fun pairTwoDevices(): Session {
     inviterThread.join()
     listener.close()
 
-    val contextId = ContextId.forCalendar(provider, requireNotNull(inviter.membershipLog()), namespace)
+    val contextId = ContextId.forCalendar(provider, result.membershipLog, namespace)
     val lane = "device-" + provider.sha256(inviterKeys.identity.signingPublicKey).toHexString().take(16)
     events.add("pairing", "both", "Paired", "Both devices hold the same master key; context ${contextId.take(16)}…")
-    return Session(EpochKeys.founding(masterKey), contextId, lane)
+    return Session(result.calendarKeys, contextId, lane)
 }
 
 /** A [FrameChannel] over a plain socket, using the library's own length framing. */

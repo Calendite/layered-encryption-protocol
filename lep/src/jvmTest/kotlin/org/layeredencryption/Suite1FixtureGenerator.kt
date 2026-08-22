@@ -15,8 +15,6 @@ import org.layeredencryption.invite.PendingInvite
 import org.layeredencryption.membership.MembershipLog
 import org.layeredencryption.membership.MembershipOp
 import org.layeredencryption.membership.WrappedKeys
-import org.layeredencryption.pairing.Inviter
-import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
 import org.layeredencryption.pairing.PairingFerry
 import org.layeredencryption.storage.FileBackedFreshnessStore
@@ -177,10 +175,8 @@ class Suite1FixtureGenerator {
         out.bytes("inviteKemPrivateKey", inviteKem.privateKey)
         out.bytes("inviteBundle", bundle.serialise())
 
-        // ── 6. Full pairing ceremony: all five wire frames ────────────────────────────────────
+        // ── 6. Full pairing ceremony: negotiation + all five ceremony frames ──────────────────
         val code = PairingCode.generate(provider)
-        val inviter = Inviter(provider, founder, code)
-        val joiner = Joiner(provider, member, code)
         val toJoiner = Channel<ByteArray>(Channel.UNLIMITED)
         val toInviter = Channel<ByteArray>(Channel.UNLIMITED)
         val frames = mutableListOf<ByteArray>()
@@ -192,16 +188,18 @@ class Suite1FixtureGenerator {
             override fun close() { toInviter.close() }
         }
         val joinerSide = CoroutineScope(EmptyCoroutineContext)
-            .async { PairingFerry.runJoiner(joinerChannel, joiner, confirmSas = { true }) }
-        PairingFerry.runInviter(inviterChannel, inviter, confirmSas = { true })
+            .async { PairingFerry.runJoiner(joinerChannel, provider, member, code, confirmSas = { true }) }
+        PairingFerry.runInviter(inviterChannel, provider, founder, code, confirmSas = { true })
         joinerSide.await()
-        check(frames.size == 5) { "Expected the 5 ceremony frames, captured ${frames.size}" }
+        check(frames.size == 7) { "Expected offer + accept + the 5 ceremony frames, captured ${frames.size}" }
         out.section("Pairing ceremony frames, in protocol order (founder invites member into a fresh calendar).")
-        out.bytes("pairingInviterHello", frames[0])
-        out.bytes("pairingJoinerResponse", frames[1])
-        out.bytes("pairingInviterConfirm", frames[2])
-        out.bytes("pairingSasConfirmed", frames[3])
-        out.bytes("pairingInviterComplete", frames[4])
+        out.bytes("pairingSuiteOffer", frames[0])
+        out.bytes("pairingSuiteAccept", frames[1])
+        out.bytes("pairingInviterHello", frames[2])
+        out.bytes("pairingJoinerResponse", frames[3])
+        out.bytes("pairingInviterConfirm", frames[4])
+        out.bytes("pairingSasConfirmed", frames[5])
+        out.bytes("pairingInviterComplete", frames[6])
 
         // ── 7. Sealed state files, both store kinds ───────────────────────────────────────────
         val storeKey = provider.randomBytes(32)

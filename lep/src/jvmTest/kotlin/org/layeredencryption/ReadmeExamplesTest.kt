@@ -58,10 +58,10 @@ class ReadmeExamplesTest {
     fun pairingFerrySnippetNamesRealApis() {
         // Compile-time check that the exact entry points the README shows exist with the shown
         // shapes; the full ceremony over a channel is exercised by InspectorTest/ContextIdTest.
-        val runInviter: suspend (FrameChannel, Inviter, suspend (String) -> Boolean) -> ByteArray =
-            PairingFerry::runInviter
-        val runJoiner: suspend (FrameChannel, Joiner, suspend (String) -> Boolean) -> ByteArray =
-            PairingFerry::runJoiner
+        // Every ceremony negotiates its suite first, so the ferry takes the device and code and
+        // builds the sessions itself.
+        val runInviter = PairingFerry::runInviter
+        val runJoiner = PairingFerry::runJoiner
         assertNotNull(runInviter)
         assertNotNull(runJoiner)
     }

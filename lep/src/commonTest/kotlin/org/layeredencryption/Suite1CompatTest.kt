@@ -74,7 +74,7 @@ class Suite1CompatTest {
         // acknowledged here deliberately; edits to shipped labels are not.
         assertEquals(
             setOf(
-                "v1/layer-chacha", "v1/layer-aes", "v1/transcript", "v1/pairing", "v1/code-secret",
+                "v1/layer-chacha", "v1/layer-aes", "v1/code-secret",
                 "v2/sas-commitment", "v1/member-key-wrap", "v2/membership",
                 "v2/invite-bundle", "v1/transcript-async", "v1/pairing-async", "v1/async-link-auth",
                 "rendezvous/v1", "rendezvous-async/v1", "context-id/v2",
@@ -224,6 +224,14 @@ class Suite1CompatTest {
 
     @Test
     fun pairingFrames_decodeAndReencodeByteExactly() {
+        val offer = Suite1Fixtures.pairingSuiteOffer()
+        assertContentEquals(offer, PairingWire.encode(PairingWire.decodeSuiteOffer(offer)))
+        assertEquals(PairingWire.TAG_SUITE_OFFER, offer[0].toInt())
+
+        val accept = Suite1Fixtures.pairingSuiteAccept()
+        assertContentEquals(accept, PairingWire.encode(PairingWire.decodeSuiteAccept(accept)))
+        assertEquals(PairingWire.TAG_SUITE_ACCEPT, accept[0].toInt())
+
         val hello = Suite1Fixtures.pairingInviterHello()
         assertContentEquals(hello, PairingWire.encode(PairingWire.decodeInviterHello(hello)))
         assertEquals(PairingWire.TAG_INVITER_HELLO, hello[0].toInt())

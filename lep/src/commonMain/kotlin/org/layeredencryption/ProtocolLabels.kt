@@ -26,12 +26,6 @@ internal object ProtocolLabels {
     /** Cascade outer layer (AES-256-GCM) key derivation. */
     const val LAYER_AES = "v1/layer-aes"
 
-    /** In-person pairing transcript hash. */
-    const val TRANSCRIPT = "v1/transcript"
-
-    /** In-person pairing master-key derivation. */
-    const val PAIRING = "v1/pairing"
-
     /**
      * The inviter's SAS commitment.
      *
@@ -148,7 +142,7 @@ internal object ProtocolLabels {
 
     /** The complete set, for the freeze test to compare against. */
     val ALL: Set<String> = setOf(
-        LAYER_CHACHA, LAYER_AES, TRANSCRIPT, PAIRING, CODE_SECRET, SAS_COMMITMENT,
+        LAYER_CHACHA, LAYER_AES, CODE_SECRET, SAS_COMMITMENT,
         MEMBER_KEY_WRAP,
         MEMBERSHIP, INVITE_BUNDLE, TRANSCRIPT_ASYNC, PAIRING_ASYNC, ASYNC_LINK_AUTH, RENDEZVOUS,
         RENDEZVOUS_ASYNC, CONTEXT_ID,

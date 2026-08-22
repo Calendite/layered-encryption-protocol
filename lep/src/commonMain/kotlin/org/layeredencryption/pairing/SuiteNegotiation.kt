@@ -44,9 +44,11 @@ object SuiteNegotiator {
         provider: CryptoProvider,
         resolver: SuiteResolver = SuiteRegistry,
         policy: PairingSuitePolicy = PairingSuitePolicy(),
+        supported: List<SuiteId> = preferenceOrder(resolver),
     ): InviterNegotiation {
         resolver.require(policy.minimumSuite)
-        val supported = preferenceOrder(resolver)
+        require(supported.isNotEmpty()) { "A device must support at least one suite" }
+        supported.forEach { resolver.require(it) }
         val offer = SuiteOffer(provider.randomBytes(NONCE_SIZE), supported, policy.minimumSuite)
         return InviterNegotiation(resolver, policy, supported, PairingWire.encode(offer))
     }
@@ -62,16 +64,18 @@ object SuiteNegotiator {
         provider: CryptoProvider,
         resolver: SuiteResolver = SuiteRegistry,
         policy: PairingSuitePolicy = PairingSuitePolicy(),
+        supported: List<SuiteId> = preferenceOrder(resolver),
     ): JoinerNegotiation {
         resolver.require(policy.minimumSuite)
+        require(supported.isNotEmpty()) { "A device must support at least one suite" }
+        supported.forEach { resolver.require(it) }
         val offer = PairingWire.decodeSuiteOffer(offerFrame)
-        val supported = preferenceOrder(resolver)
         val selected = select(resolver, supported, policy.minimumSuite, offer.supportedSuites, offer.minimumSuite)
             ?: throw PairingException("No mutually acceptable suite — refusing to pair")
         val accept = SuiteAccept(provider.randomBytes(NONCE_SIZE), supported, policy.minimumSuite, selected.id)
         val acceptFrame = PairingWire.encode(accept)
         return JoinerNegotiation(
-            NegotiatedSuiteContext(selected, offerFrame, acceptFrame, offer.supportedSuites.toSet()),
+            NegotiatedSuiteContext(selected, offerFrame, acceptFrame, offer.supportedSuites.toSet(), resolver),
             acceptFrame,
         )
     }
@@ -154,7 +158,7 @@ class InviterNegotiation internal constructor(
                 "Responder selected suite ${selected.value} where the negotiation rule requires ${recomputed.id.value}",
             )
         }
-        return NegotiatedSuiteContext(recomputed, _offerFrame, acceptFrame, accept.supportedSuites.toSet())
+        return NegotiatedSuiteContext(recomputed, _offerFrame, acceptFrame, accept.supportedSuites.toSet(), resolver)
     }
 }
 
@@ -189,6 +193,8 @@ class NegotiatedSuiteContext internal constructor(
     acceptFrame: ByteArray,
     /** Everything the peer advertised — persist the strongest for cross-ceremony pinning. */
     val peerSupported: Set<SuiteId>,
+    /** The resolver the negotiation ran under; the ceremony's suite lookups use the same one. */
+    internal val resolver: SuiteResolver,
 ) {
     private val _offerFrame = offerFrame.copyOf()
     private val _acceptFrame = acceptFrame.copyOf()

@@ -12,7 +12,6 @@ import org.layeredencryption.identity.DeviceKeys
 import org.layeredencryption.membership.MembershipLog
 import org.layeredencryption.membership.MembershipOp
 import org.layeredencryption.membership.MembershipVerification
-import org.layeredencryption.suite.Suite1
 import org.layeredencryption.toHexString
 
 /** Raised when a pairing cannot proceed — a MAC mismatch, an invalid log, or misuse of the state machine. */
@@ -138,14 +137,25 @@ class Inviter(
     /** Domain-separates every derivation in the ceremony (LEP-10); both sides must agree. */
     private val namespace: ProtocolNamespace = ProtocolNamespace.Default,
     /**
-     * Present only in the negotiated flow ([PairingFerry.runNegotiatedInviter]): routes every
-     * crypto operation through the selected suite and switches the transcript to the v2
-     * construction that authenticates the negotiation. Null is the explicit legacy Suite 1
-     * flow, byte for byte.
+     * The completed negotiation ([PairingFerry.runInviter]): routes every crypto operation
+     * through the selected suite, and the transcript binds the negotiation frames — every
+     * ceremony is negotiated. The device's identity must belong to the selected suite: the
+     * identity rides the MAC'd transcript, so this equality is authenticated end to end.
      */
-    private val negotiated: NegotiatedSuiteContext? = null,
+    private val negotiated: NegotiatedSuiteContext,
 ) {
-    private val suite = negotiated?.suite ?: Suite1
+    private val suite = negotiated.suite
+
+    /** The resolver the negotiation ran under; the ferry decodes peer identities with it. */
+    internal val suiteResolver get() = negotiated.resolver
+
+    init {
+        if (device.identity.suiteId != suite.id) {
+            throw PairingException(
+                "This device's identity is suite ${device.identity.suiteId.value}; the ceremony selected ${suite.id.value}",
+            )
+        }
+    }
     private val xWingKeyPair = suite.kem.generateKeyPair(provider)
     private var stage = InviterStage.AWAITING_HELLO
 
@@ -207,7 +217,10 @@ class Inviter(
     /** Verifies the joiner's code-keyed MAC and returns the inviter's own MAC. Throws on mismatch. */
     fun onJoinerResponse(response: JoinerResponse): InviterConfirm {
         requireStage(InviterStage.AWAITING_RESPONSE)
-        if (!response.joinerDeviceIdentity.verifyBinding(provider, namespace)) {
+        if (response.joinerDeviceIdentity.suiteId != suite.id) {
+            throw PairingException("Joiner identity is suite ${response.joinerDeviceIdentity.suiteId.value}; the ceremony selected ${suite.id.value}")
+        }
+        if (!response.joinerDeviceIdentity.verifyBinding(provider, namespace, negotiated.resolver)) {
             throw PairingException("Joiner device-identity binding is invalid")
         }
         // Scrubbed on every exit (RT-05): a MAC mismatch throw must not leave the shared secret,
@@ -278,7 +291,10 @@ class Inviter(
         val wrappedMasterKey = suite.aead.seal(provider, handshakeKey, keys.serialise(), aad = joiner.serialise(), namespace = namespace)
         val base = existing?.membershipLog
             ?: MembershipLog.found(provider, device.identity, device.signingKeyPair, namespace = namespace)
-        val log = base.append(provider, MembershipOp.ADD, joiner, wrappedMasterKey, signer = device.signingKeyPair, namespace = namespace)
+        val log = base.append(
+            provider, MembershipOp.ADD, joiner, wrappedMasterKey,
+            signer = device.signingKeyPair, namespace = namespace, resolver = negotiated.resolver,
+        )
         membershipLog = log
         val message = InviterComplete(log.serialise())
         stage = InviterStage.COMPLETED
@@ -315,10 +331,21 @@ class Joiner(
     private val code: PairingCode,
     /** Domain-separates every derivation in the ceremony (LEP-10); both sides must agree. */
     private val namespace: ProtocolNamespace = ProtocolNamespace.Default,
-    /** See [Inviter]'s `negotiated`: null is the explicit legacy Suite 1 flow, byte for byte. */
-    private val negotiated: NegotiatedSuiteContext? = null,
+    /** See [Inviter]'s `negotiated`: every ceremony is negotiated. */
+    private val negotiated: NegotiatedSuiteContext,
 ) {
-    private val suite = negotiated?.suite ?: Suite1
+    private val suite = negotiated.suite
+
+    /** The resolver the negotiation ran under; the ferry decodes peer identities with it. */
+    internal val suiteResolver get() = negotiated.resolver
+
+    init {
+        if (device.identity.suiteId != suite.id) {
+            throw PairingException(
+                "This device's identity is suite ${device.identity.suiteId.value}; the ceremony selected ${suite.id.value}",
+            )
+        }
+    }
     private var stage = JoinerStage.AWAITING_HELLO
     private var handshakeKey: ByteArray? = null
     private var expectedInviterMac: ByteArray? = null
@@ -369,7 +396,10 @@ class Joiner(
     /** Encapsulates against the inviter's key and returns the joiner's response with its MAC. */
     fun onInviterHello(hello: InviterHello): JoinerResponse {
         requireStage(JoinerStage.AWAITING_HELLO)
-        if (!hello.inviterDeviceIdentity.verifyBinding(provider, namespace)) {
+        if (hello.inviterDeviceIdentity.suiteId != suite.id) {
+            throw PairingException("Inviter identity is suite ${hello.inviterDeviceIdentity.suiteId.value}; the ceremony selected ${suite.id.value}")
+        }
+        if (!hello.inviterDeviceIdentity.verifyBinding(provider, namespace, negotiated.resolver)) {
             throw PairingException("Inviter device-identity binding is invalid")
         }
         val encapsulation = suite.kem.encapsulate(provider, hello.xWingPublicKey)
@@ -454,9 +484,9 @@ class Joiner(
         requireStage(JoinerStage.SAS_CONFIRMED)
         if (confirmation.session !== this) throw PairingException("SAS confirmation belongs to a different session")
         val handshakeKey = handshakeKey ?: throw PairingException("onInviterComplete() called before the handshake")
-        val log = MembershipLog.deserialise(complete.membershipLog)
+        val log = MembershipLog.deserialise(complete.membershipLog, negotiated.resolver)
 
-        val verification = log.verify(provider, namespace)
+        val verification = log.verify(provider, namespace, negotiated.resolver)
         if (verification !is MembershipVerification.Valid) {
             throw PairingException("Membership log failed verification: $verification")
         }

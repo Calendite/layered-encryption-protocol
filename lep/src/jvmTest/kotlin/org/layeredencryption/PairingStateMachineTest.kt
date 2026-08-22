@@ -5,6 +5,7 @@ import org.layeredencryption.pairing.Inviter
 import org.layeredencryption.pairing.InviterConfirm
 import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
+import org.layeredencryption.pairing.TestNegotiation
 import org.layeredencryption.pairing.PairingException
 import org.layeredencryption.pairing.SasConfirmation
 import kotlin.test.Test
@@ -25,13 +26,15 @@ class PairingStateMachineTest {
 
     private val provider: CryptoProvider = BouncyCastleCryptoProvider()
 
+    private val negotiation = TestNegotiation.pair(provider)
+
     /** A token no session ever issued — the only way a test can even attempt to forge one. */
     private val forgedToken = SasConfirmation(Any())
 
     private fun sessions(sameCode: Boolean = true): Pair<Inviter, Joiner> {
         val code = PairingCode.generate(provider)
-        val inviter = Inviter(provider, DeviceKeys.generate(provider), code)
-        val joiner = Joiner(provider, DeviceKeys.generate(provider), if (sameCode) code else PairingCode.generate(provider))
+        val inviter = Inviter(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.first)
+        val joiner = Joiner(provider, DeviceKeys.generate(provider), if (sameCode) code else PairingCode.generate(provider), negotiated = negotiation.second)
         return inviter to joiner
     }
 

@@ -59,6 +59,37 @@ class RecordingChannel(
         val tag = if (frame.isEmpty()) -1 else frame[0].toInt()
         return runCatching {
             when (tag) {
+                PairingWire.TAG_SUITE_OFFER -> {
+                    val offer = PairingWire.decodeSuiteOffer(frame)
+                    RecordedMessage(
+                        name = "SuiteOffer", tag = tag, from = from, sizeBytes = frame.size,
+                        algorithms = listOf("no algorithm yet: a capability list"),
+                        establishes = "nothing yet: the offer is authenticated retroactively by the ceremony MACs, which bind these exact bytes",
+                        elapsedMillis = elapsed,
+                        fields = listOf(
+                            RecordedField("supportedSuites", offer.supportedSuites.size * 2,
+                                offer.supportedSuites.joinToString(",") { it.value.toString() },
+                                note = "Suite ids this device can run, strongest first."),
+                            field("nonce", offer.nonce, note = "Fresh per ceremony; bound into the transcript."),
+                        ),
+                    )
+                }
+                PairingWire.TAG_SUITE_ACCEPT -> {
+                    val accept = PairingWire.decodeSuiteAccept(frame)
+                    RecordedMessage(
+                        name = "SuiteAccept", tag = tag, from = from, sizeBytes = frame.size,
+                        algorithms = listOf("no algorithm yet: a selection"),
+                        establishes = "a provisional suite selection; every later proof and derived key binds it",
+                        elapsedMillis = elapsed,
+                        fields = listOf(
+                            RecordedField("selectedSuite", 2, accept.selectedSuite.value.toString(),
+                                note = "The strongest mutually supported suite — both sides recompute and must agree."),
+                            RecordedField("supportedSuites", accept.supportedSuites.size * 2,
+                                accept.supportedSuites.joinToString(",") { it.value.toString() }),
+                            field("nonce", accept.nonce),
+                        ),
+                    )
+                }
                 PairingWire.TAG_INVITER_HELLO -> {
                     val hello = PairingWire.decodeInviterHello(frame)
                     RecordedMessage(

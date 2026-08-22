@@ -89,8 +89,8 @@ class DecoderFuzz {
     @FuzzTest(maxDuration = "30s")
     fun pairingWire(data: ByteArray) {
         for (decode in listOf<(ByteArray) -> Any?>(
-            PairingWire::decodeInviterHello,
-            PairingWire::decodeJoinerResponse,
+            { frame: ByteArray -> PairingWire.decodeInviterHello(frame) },
+            { frame: ByteArray -> PairingWire.decodeJoinerResponse(frame) },
             PairingWire::decodeInviterConfirm,
             PairingWire::decodeInviterComplete,
             { PairingWire.decodeSasConfirmed(it) },

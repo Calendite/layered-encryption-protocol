@@ -10,6 +10,7 @@ import org.layeredencryption.membership.Reconciliation
 import org.layeredencryption.pairing.Inviter
 import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
+import org.layeredencryption.pairing.TestNegotiation
 import org.layeredencryption.pairing.PairingException
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -28,6 +29,8 @@ import kotlin.test.assertTrue
 class NamespaceIsolationTest {
 
     private val provider: CryptoProvider = BouncyCastleCryptoProvider()
+
+    private val negotiation = TestNegotiation.pair(provider)
     private val appA = ProtocolNamespace("app-a")
     private val appB = ProtocolNamespace("app-b")
 
@@ -61,13 +64,13 @@ class NamespaceIsolationTest {
 
         // Cross-namespace: the joiner's code-keyed MAC is derived under different labels, so the
         // inviter rejects it exactly as it would a wrong code or a man-in-the-middle.
-        val inviterA = Inviter(provider, DeviceKeys.generate(provider, namespace = appA), code, namespace = appA)
-        val joinerB = Joiner(provider, DeviceKeys.generate(provider, namespace = appB), code, namespace = appB)
+        val inviterA = Inviter(provider, DeviceKeys.generate(provider, namespace = appA), code, namespace = appA, negotiated = negotiation.first)
+        val joinerB = Joiner(provider, DeviceKeys.generate(provider, namespace = appB), code, namespace = appB, negotiated = negotiation.second)
         assertFailsWith<PairingException> { inviterA.onJoinerResponse(joinerB.onInviterHello(inviterA.hello())) }
 
         // Same custom namespace end to end: the full ceremony completes and keys match.
-        val inviter = Inviter(provider, DeviceKeys.generate(provider, namespace = appA), code, namespace = appA)
-        val joiner = Joiner(provider, DeviceKeys.generate(provider, namespace = appA), code, namespace = appA)
+        val inviter = Inviter(provider, DeviceKeys.generate(provider, namespace = appA), code, namespace = appA, negotiated = negotiation.first)
+        val joiner = Joiner(provider, DeviceKeys.generate(provider, namespace = appA), code, namespace = appA, negotiated = negotiation.second)
         val response = joiner.onInviterHello(inviter.hello())
         joiner.onInviterConfirm(inviter.onJoinerResponse(response))
         joiner.onInviterComplete(inviter.complete(inviter.confirmSas()), joiner.confirmSas())

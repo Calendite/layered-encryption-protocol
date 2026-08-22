@@ -11,6 +11,7 @@ import org.layeredencryption.pairing.ContextId
 import org.layeredencryption.pairing.Inviter
 import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
+import org.layeredencryption.pairing.TestNegotiation
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.test.runTest
@@ -27,6 +28,8 @@ import kotlin.test.assertTrue
 class ContextIdTest {
 
     private val provider: CryptoProvider = BouncyCastleCryptoProvider()
+
+    private val negotiation = TestNegotiation.pair(provider)
 
     private class PipeChannel(
         private val incoming: Channel<ByteArray>,
@@ -103,11 +106,11 @@ class ContextIdTest {
     fun bothSidesOfARealPairingAgreeOnTheIdAndKeepTheLog() = runTest {
         val code = PairingCode.generate(provider)
         val (inviterChannel, joinerChannel) = pipePair()
-        val inviter = Inviter(provider, DeviceKeys.generate(provider), code)
-        val joiner = Joiner(provider, DeviceKeys.generate(provider), code)
+        val inviter = Inviter(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.first)
+        val joiner = Joiner(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.second)
 
-        val inviterKey = async { PairingFerry.runInviter(inviterChannel, inviter) { true } }
-        val joinerKey = async { PairingFerry.runJoiner(joinerChannel, joiner) { true } }
+        val inviterKey = async { PairingFerry.ferryInviter(inviterChannel, inviter) { true } }
+        val joinerKey = async { PairingFerry.ferryJoiner(joinerChannel, joiner) { true } }
 
         inviterKey.await()
         joinerKey.await()
@@ -125,7 +128,7 @@ class ContextIdTest {
 
     @Test
     fun theLogIsNotAvailableBeforeTheCeremonyFinishes() {
-        val inviter = Inviter(provider, DeviceKeys.generate(provider), PairingCode.generate(provider))
+        val inviter = Inviter(provider, DeviceKeys.generate(provider), PairingCode.generate(provider), negotiated = negotiation.first)
 
         assertTrue(inviter.membershipLog() == null, "nothing to persist until complete() has run")
     }

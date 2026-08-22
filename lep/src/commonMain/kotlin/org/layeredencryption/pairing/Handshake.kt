@@ -26,12 +26,12 @@ class PairingTranscript(
     /** Carried here so every derivation from this transcript uses the same labels. */
     val namespace: ProtocolNamespace = ProtocolNamespace.Default,
     /**
-     * Present only in the negotiated flow: switches [bytes] to the v2 construction, which binds
-     * the selected suite id and the raw offer/accept frames ahead of the classic fields — so the
-     * code-keyed MACs computed over this transcript authenticate the negotiation itself. Null is
-     * the legacy Suite 1 flow, byte for byte (fixture-guarded).
+     * The completed negotiation: [bytes] binds the selected suite id and the raw offer/accept
+     * frames ahead of the classic fields, so the code-keyed MACs computed over this transcript
+     * authenticate the negotiation itself. Every ceremony is negotiated — there is no
+     * un-negotiated flow.
      */
-    internal val negotiated: NegotiatedSuiteContext? = null,
+    internal val negotiated: NegotiatedSuiteContext,
 ) {
     // Copied both ways: a transcript that keyed a MAC cannot be edited into a different one.
     private val _inviterXWingPublicKey = inviterXWingPublicKey.copyOf()
@@ -51,35 +51,23 @@ class PairingTranscript(
      */
     val sasCommitment: ByteArray get() = _sasCommitment.copyOf()
 
-    fun bytes(): ByteArray = if (negotiated == null) {
-        FrameWriter()
-            .putBytes(namespace.label(SUFFIX))
-            .putBytes(_inviterXWingPublicKey)
-            .putBytes(_inviterDeviceIdentity)
-            .putBytes(_kemCiphertext)
-            .putBytes(_joinerDeviceIdentity)
-            .putBytes(_sasCommitment)
-            .toByteArray()
-    } else {
-        // The raw offer/accept frames, byte for byte as sent/received — never re-encodings.
-        // Tampering with either frame in flight makes the two ends' transcripts disagree, so
-        // both code-keyed MACs fail: this is what turns the provisional negotiation checks
-        // into an authenticated negotiation (the migration brief §3).
-        FrameWriter()
-            .putBytes(namespace.label(SUFFIX_NEGOTIATED))
-            .putBytes(negotiated.suite.id.toWireBytes())
-            .putBytes(negotiated.offerFrame)
-            .putBytes(negotiated.acceptFrame)
-            .putBytes(_inviterXWingPublicKey)
-            .putBytes(_inviterDeviceIdentity)
-            .putBytes(_kemCiphertext)
-            .putBytes(_joinerDeviceIdentity)
-            .putBytes(_sasCommitment)
-            .toByteArray()
-    }
+    // The raw offer/accept frames, byte for byte as sent/received — never re-encodings.
+    // Tampering with either frame in flight makes the two ends' transcripts disagree, so
+    // both code-keyed MACs fail: this is what turns the provisional negotiation checks
+    // into an authenticated negotiation (the migration brief §3).
+    fun bytes(): ByteArray = FrameWriter()
+        .putBytes(namespace.label(SUFFIX_NEGOTIATED))
+        .putBytes(negotiated.suite.id.toWireBytes())
+        .putBytes(negotiated.offerFrame)
+        .putBytes(negotiated.acceptFrame)
+        .putBytes(_inviterXWingPublicKey)
+        .putBytes(_inviterDeviceIdentity)
+        .putBytes(_kemCiphertext)
+        .putBytes(_joinerDeviceIdentity)
+        .putBytes(_sasCommitment)
+        .toByteArray()
 
     private companion object {
-        const val SUFFIX = ProtocolLabels.TRANSCRIPT
         const val SUFFIX_NEGOTIATED = ProtocolLabels.TRANSCRIPT_NEGOTIATED
     }
 }
@@ -101,12 +89,10 @@ object Handshake {
     private const val SAS_DIGITS = 6
     private const val SAS_GROUP = 3
 
-    private const val SUFFIX_PAIRING = ProtocolLabels.PAIRING
     private const val SUFFIX_PAIRING_NEGOTIATED = ProtocolLabels.PAIRING_NEGOTIATED
     private const val SUFFIX_SAS_NEGOTIATED = ProtocolLabels.SAS_NEGOTIATED
     private const val SUFFIX_CODE_SECRET = ProtocolLabels.CODE_SECRET
     private const val SUFFIX_SAS_COMMITMENT = ProtocolLabels.SAS_COMMITMENT
-    private val SAS_INFO = "sas".encodeToByteArray()
 
     /** 32 bytes: the nonce only has to be unguessable until it is revealed one message later. */
     const val SAS_NONCE_SIZE = 32
@@ -144,18 +130,16 @@ object Handshake {
     ): Boolean = sasCommitment(provider, sasNonce, namespace).constantTimeEquals(commitment)
 
     /**
-     * `K_handshake = HKDF(ss, transcript, "calendite/v1/pairing")` — delivers the wrapped keys
-     * once. In the negotiated flow the info becomes `"calendite/v1/pairing-negotiated" ‖ suiteId`:
-     * the selected suite rides in the derivation itself, not only in the transcript salt.
+     * `K_handshake = HKDF(ss, transcript, "calendite/v1/pairing-negotiated" ‖ suiteId)` —
+     * delivers the wrapped keys once; the selected suite rides in the derivation itself, not
+     * only in the transcript salt.
      */
     fun handshakeKey(
         provider: CryptoProvider,
         sharedSecret: ByteArray,
         transcript: PairingTranscript,
     ): ByteArray {
-        val info = transcript.negotiated
-            ?.let { transcript.namespace.label(SUFFIX_PAIRING_NEGOTIATED) + it.suite.id.toWireBytes() }
-            ?: transcript.namespace.label(SUFFIX_PAIRING)
+        val info = transcript.namespace.label(SUFFIX_PAIRING_NEGOTIATED) + transcript.negotiated.suite.id.toWireBytes()
         return provider.hkdfSha256(ikm = sharedSecret, salt = transcript.bytes(), info = info, length = KEY_SIZE)
     }
 
@@ -204,9 +188,7 @@ object Handshake {
         transcript: PairingTranscript,
         sasNonce: ByteArray,
     ): String {
-        val info = transcript.negotiated
-            ?.let { transcript.namespace.label(SUFFIX_SAS_NEGOTIATED) + it.suite.id.toWireBytes() }
-            ?: SAS_INFO
+        val info = transcript.namespace.label(SUFFIX_SAS_NEGOTIATED) + transcript.negotiated.suite.id.toWireBytes()
         val entropy = provider.hkdfSha256(ikm = sharedSecret, salt = transcript.bytes() + sasNonce, info = info, length = SAS_ENTROPY_BYTES)
         var value = 0L
         for (byte in entropy) value = (value * 256 + (byte.toInt() and 0xFF)) % SAS_MODULUS

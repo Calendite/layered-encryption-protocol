@@ -100,10 +100,12 @@ envelope.openAndValidate(provider, keys, contextId, lane, freshness) { bytes ->
 Pairing, over any channel that can send and receive byte frames:
 
 ```kotlin
-// One device invites, the other joins. Both humans compare the same six-digit string and
-// confirm; the ferry releases the master key only after both confirmations.
-val masterKey = PairingFerry.runInviter(channel, inviter, confirmSas = { sas -> ui.askUser(sas) })
-val masterKey = PairingFerry.runJoiner(channel, joiner, confirmSas = { sas -> ui.askUser(sas) })
+// One device invites, the other joins. The ferry negotiates the cryptographic suite first,
+// then both humans compare the same six-digit string and confirm; the master key is released
+// only after both confirmations. The result carries the key, the epoch keys, and the verified
+// membership log to persist.
+val result = PairingFerry.runInviter(channel, provider, device, code, confirmSas = { sas -> ui.askUser(sas) })
+val result = PairingFerry.runJoiner(channel, provider, device, code, confirmSas = { sas -> ui.askUser(sas) })
 ```
 
 `PairingFerry` is the safe facade, and using it is the recommended path: it drives the ceremony in
@@ -125,8 +127,9 @@ and the default is `calendite`, the application this was extracted from. Pass yo
 ```kotlin
 val namespace = ProtocolNamespace("mycoolapp")   // labels become mycoolapp/v1/...
 
-val device = DeviceKeys.generate(provider, namespace)          // identity binding
-val inviter = Inviter(provider, device, code, namespace = namespace)   // live pairing
+val device = DeviceKeys.generate(provider, namespace = namespace)  // identity binding
+// live pairing: pass the namespace to the ferry
+PairingFerry.runInviter(channel, provider, device, code, namespace = namespace, confirmSas = ::ask)
 val invite = AsyncInviter.create(provider, device, now, expiry, namespace = namespace)
 val log = MembershipLog.found(provider, device.identity, device.signingKeyPair, namespace = namespace)
 Cascade.seal(provider, key, plaintext, aad, namespace)         // data

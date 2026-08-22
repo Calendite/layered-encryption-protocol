@@ -4,8 +4,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.test.runTest
 import org.layeredencryption.identity.DeviceKeys
-import org.layeredencryption.pairing.Inviter
-import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
 import org.layeredencryption.pairing.PairingFerry
 import java.io.File
@@ -78,8 +76,6 @@ class InspectorTest {
 
         val inviterKeys = DeviceKeys.generate(provider)
         val joinerKeys = DeviceKeys.generate(provider)
-        val inviter = Inviter(provider, inviterKeys, code)
-        val joiner = Joiner(provider, joinerKeys, code)
 
         val (inviterChannel, joinerChannel) = pipePair()
         // Only the inviter's side is wrapped: one recorder sees every frame in both directions,
@@ -88,9 +84,9 @@ class InspectorTest {
 
         var sas = ""
         val joinerSide = kotlinx.coroutines.CoroutineScope(kotlin.coroutines.EmptyCoroutineContext)
-            .async { PairingFerry.runJoiner(joinerChannel, joiner, confirmSas = { true }) }
-        val inviterKey = PairingFerry.runInviter(recording, inviter, confirmSas = { shown -> sas = shown; true })
-        val joinerKey = joinerSide.await()
+            .async { PairingFerry.runJoiner(joinerChannel, provider, joinerKeys, code, confirmSas = { true }) }
+        val inviterKey = PairingFerry.runInviter(recording, provider, inviterKeys, code, confirmSas = { shown -> sas = shown; true }).masterKey
+        val joinerKey = joinerSide.await().masterKey
 
         assertContentEquals(inviterKey, joinerKey, "both sides must end with the same master key")
         collector.outcome(true, "paired; both sides hold the same master key")
@@ -124,11 +120,14 @@ class InspectorTest {
         val steps = run.collector.messages
 
         assertEquals(
-            listOf("InviterHello", "JoinerResponse", "InviterConfirm", "SasConfirmed", "InviterComplete"),
+            listOf(
+                "SuiteOffer", "SuiteAccept",
+                "InviterHello", "JoinerResponse", "InviterConfirm", "SasConfirmed", "InviterComplete",
+            ),
             steps.map { it.name },
             "every frame should be decoded and attributed, in the order the protocol sends them",
         )
-        assertEquals(listOf("inviter", "joiner", "inviter", "joiner", "inviter"), steps.map { it.from })
+        assertEquals(listOf("inviter", "joiner", "inviter", "joiner", "inviter", "joiner", "inviter"), steps.map { it.from })
         assertTrue(steps.all { it.sizeBytes > 0 })
         assertTrue(run.collector.succeeded)
     }

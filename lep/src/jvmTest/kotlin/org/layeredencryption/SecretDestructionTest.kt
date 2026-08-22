@@ -8,6 +8,7 @@ import org.layeredencryption.pairing.Inviter
 import org.layeredencryption.pairing.InviterConfirm
 import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
+import org.layeredencryption.pairing.TestNegotiation
 import org.layeredencryption.pairing.PairingException
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -22,6 +23,8 @@ import kotlin.test.assertTrue
 class SecretDestructionTest {
 
     private val provider: CryptoProvider = BouncyCastleCryptoProvider()
+
+    private val negotiation = TestNegotiation.pair(provider)
 
     @Test
     fun deviceKeys_destroyEndsPrivateKeyAccessButNotTheIdentity() {
@@ -77,8 +80,8 @@ class SecretDestructionTest {
         val inviterDevice = DeviceKeys.generate(provider)
         val joinerDevice = DeviceKeys.generate(provider)
         val code = PairingCode.generate(provider)
-        val inviter = Inviter(provider, inviterDevice, code)
-        val joiner = Joiner(provider, joinerDevice, code)
+        val inviter = Inviter(provider, inviterDevice, code, negotiated = negotiation.first)
+        val joiner = Joiner(provider, joinerDevice, code, negotiated = negotiation.second)
 
         val response = joiner.onInviterHello(inviter.hello())
         val confirm = inviter.onJoinerResponse(response)
@@ -103,8 +106,8 @@ class SecretDestructionTest {
     fun pairingSessions_failurePathScrubIsTerminal() {
         val code = PairingCode.generate(provider)
         val wrongCode = PairingCode.generate(provider)
-        val inviter = Inviter(provider, DeviceKeys.generate(provider), code)
-        val joiner = Joiner(provider, DeviceKeys.generate(provider), wrongCode)
+        val inviter = Inviter(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.first)
+        val joiner = Joiner(provider, DeviceKeys.generate(provider), wrongCode, negotiated = negotiation.second)
 
         // Wrong code: the inviter rejects the joiner's MAC; both sides then destroy, as the
         // ferry does in its finally.
@@ -122,7 +125,7 @@ class SecretDestructionTest {
         val device = DeviceKeys.generate(provider)
         val existingKeys = EpochKeys.founding(provider.randomBytes(32))
         val existingLog = MembershipLog.found(provider, device.identity, device.signingKeyPair)
-        val inviter = Inviter(provider, device, PairingCode.generate(provider), ExistingCalendar(existingKeys, existingLog))
+        val inviter = Inviter(provider, device, PairingCode.generate(provider), ExistingCalendar(existingKeys, existingLog), negotiated = negotiation.first)
 
         inviter.destroy()
         // The context keys are the application's, merely referenced by the session.

@@ -199,7 +199,8 @@ class SuiteNegotiationTest {
         )
     }
 
-    private fun ceremonyDevices() = DeviceKeys.generate(provider) to DeviceKeys.generate(provider)
+    private fun ceremonyDevices(suite: org.layeredencryption.suite.ProtocolSuite = Suite1) =
+        DeviceKeys.generate(provider, suite) to DeviceKeys.generate(provider, suite)
 
     private fun CoroutineScope.launchJoiner(
         wire: Wire,
@@ -209,26 +210,44 @@ class SuiteNegotiationTest {
         policy: PairingSuitePolicy = PairingSuitePolicy(),
     ): Deferred<Result<ByteArray>> = async {
         runCatching {
-            PairingFerry.runNegotiatedJoiner(wire.joinerChannel, provider, joinerKeys, code, resolver = resolver, policy = policy) { true }
+            PairingFerry.runJoiner(wire.joinerChannel, provider, joinerKeys, code, resolver = resolver, policy = policy) { true }.masterKey
         }
     }
 
     @Test
-    fun negotiatedCeremony_selectsTheStrongestSuiteAndAgreesOnKeys() = runTest {
-        val (inviterKeys, joinerKeys) = ceremonyDevices()
+    fun negotiatedCeremony_runsEndToEndUnderANonDefaultSuite() = runTest {
+        // Devices whose identities live under the fake suite pair under it: the whole ceremony —
+        // KEM, transcript, MACs, wrapped keys, membership log — routes through the negotiated
+        // suite, and the offer advertises exactly the suites the device holds identities for.
+        val (inviterKeys, joinerKeys) = ceremonyDevices(fake)
         val code = PairingCode.generate(provider)
         val wire = wire()
 
         val joiner = CoroutineScope(EmptyCoroutineContext).launchJoiner(wire, joinerKeys, code)
-        val inviterKey = PairingFerry.runNegotiatedInviter(
+        val inviterKey = PairingFerry.runInviter(
             wire.inviterChannel, provider, inviterKeys, code, resolver = resolver,
-        ) { true }
+        ) { true }.masterKey
         val joinerKey = joiner.await().getOrThrow()
 
         assertContentEquals(inviterKey, joinerKey, "both sides must end with the same master key")
-        // The first frame is the offer: the fake suite (strength 2) is what both must select.
         val offer = PairingWire.decodeSuiteOffer(wire.frames.first())
-        assertEquals(listOf(FakeSuites.FAKE_ID, SuiteId.LEP_HYBRID_2026), offer.supportedSuites)
+        assertEquals(listOf(FakeSuites.FAKE_ID), offer.supportedSuites)
+        val accept = PairingWire.decodeSuiteAccept(wire.frames[1])
+        assertEquals(FakeSuites.FAKE_ID, accept.selectedSuite)
+    }
+
+    @Test
+    fun mismatchedIdentityAndSelection_isRejectedAtSessionConstruction() {
+        // A device whose identity belongs to a different suite than the negotiation selected can
+        // never run the ceremony — the identity rides the MAC'd transcript, so this equality is
+        // load-bearing, not cosmetic.
+        val context = org.layeredencryption.pairing.TestNegotiation.single(provider) // selects Suite 1
+        val fakeDevice = DeviceKeys.generate(provider, fake)
+        assertFailsWith<PairingException> {
+            org.layeredencryption.pairing.Inviter(
+                provider, fakeDevice, PairingCode.generate(provider), negotiated = context,
+            )
+        }
     }
 
     @Test
@@ -238,19 +257,18 @@ class SuiteNegotiationTest {
         val wire = wire()
 
         val joiner = CoroutineScope(EmptyCoroutineContext).launchJoiner(wire, joinerKeys, code, resolver = SuiteRegistry)
-        val inviterKey = PairingFerry.runNegotiatedInviter(
+        val inviterKey = PairingFerry.runInviter(
             wire.inviterChannel, provider, inviterKeys, code, resolver = SuiteRegistry,
-        ) { true }
+        ) { true }.masterKey
         assertContentEquals(inviterKey, joiner.await().getOrThrow())
     }
 
     @Test
-    fun strippingTheStrongSuiteFromBothFrames_failsAtTheMacs() = runTest {
-        // A MITM consistently strips the fake suite from the offer AND the accept, so every
-        // provisional check passes and both sides run the ceremony under Suite 1 — but each end
-        // bound the frames it actually saw into its transcript, so the code-keyed MACs disagree.
-        // This is the doc's "removal of supported suites causes transcript verification to fail".
-        val (inviterKeys, joinerKeys) = ceremonyDevices()
+    fun strippingTheOfferedSuite_abortsBeforeAnyCeremonyFrame() = runTest {
+        // A MITM replaces the fake-suite offer with a Suite-1-only one. The joiner's own identity
+        // lives under the fake suite, so the intersection is empty and it refuses outright: the
+        // downgrade dies at selection, with zero ceremony frames — never a quieter suite.
+        val (inviterKeys, joinerKeys) = ceremonyDevices(fake)
         val code = PairingCode.generate(provider)
         val wire = wire(
             tamperInviterSend = { frame ->
@@ -259,43 +277,50 @@ class SuiteNegotiationTest {
                     PairingWire.encode(SuiteOffer(offer.nonce, listOf(SuiteId.LEP_HYBRID_2026), offer.minimumSuite))
                 } else frame
             },
-            tamperJoinerSend = { frame ->
-                if (frame.isNotEmpty() && frame[0].toInt() == PairingWire.TAG_SUITE_ACCEPT) {
-                    val accept = PairingWire.decodeSuiteAccept(frame)
-                    PairingWire.encode(SuiteAccept(accept.nonce, listOf(SuiteId.LEP_HYBRID_2026), accept.minimumSuite, accept.selectedSuite))
-                } else frame
-            },
         )
 
         val joiner = CoroutineScope(EmptyCoroutineContext).launchJoiner(wire, joinerKeys, code)
-        val failure = assertFailsWith<PairingException> {
-            PairingFerry.runNegotiatedInviter(wire.inviterChannel, provider, inviterKeys, code, resolver = resolver) { true }
+        val inviter = runCatching {
+            PairingFerry.runInviter(wire.inviterChannel, provider, inviterKeys, code, resolver = resolver) { true }
         }
-        assertTrue("MAC" in failure.message.orEmpty(), "must die at authentication, was: ${failure.message}")
-        assertTrue(joiner.await().isFailure, "the joiner cannot complete either")
+        assertTrue(joiner.await().isFailure, "the joiner must refuse the downgraded offer")
+        assertTrue(inviter.isFailure)
+        for (frame in wire.frames) {
+            val tag = frame.firstOrNull()?.toInt() ?: fail("empty frame recorded")
+            assertTrue(tag == PairingWire.TAG_SUITE_OFFER, "no later frame may ever cross; saw tag $tag")
+        }
     }
 
     @Test
-    fun reorderingTheOfferList_failsAtTheMacs() = runTest {
-        // Same selection on both ends (the rule is order-independent), but the transcript binds
-        // the raw frame bytes: a reordered list is a different frame, so the MACs disagree.
-        val (inviterKeys, joinerKeys) = ceremonyDevices()
-        val code = PairingCode.generate(provider)
-        val wire = wire(
-            tamperInviterSend = { frame ->
-                if (frame.isNotEmpty() && frame[0].toInt() == PairingWire.TAG_SUITE_OFFER) {
-                    val offer = PairingWire.decodeSuiteOffer(frame)
-                    PairingWire.encode(SuiteOffer(offer.nonce, offer.supportedSuites.reversed(), offer.minimumSuite))
-                } else frame
-            },
+    fun tamperedNegotiationFrames_failAtTheCeremonyMacs() {
+        // The transcript binds the RAW offer/accept bytes: two sessions holding contexts that
+        // differ by a single reordered-list re-encoding of the offer (same logical content, same
+        // selection — every provisional check passes) must fail each other's code-keyed MACs.
+        // This is the doc's "removal or reordering of supported suites causes transcript
+        // verification to fail", exercised at the binding itself.
+        val inviterNegotiation = SuiteNegotiator.beginInviter(
+            provider, resolver, supported = listOf(FakeSuites.FAKE_ID, SuiteId.LEP_HYBRID_2026),
         )
+        val offer = PairingWire.decodeSuiteOffer(inviterNegotiation.offerFrame)
+        val reordered = PairingWire.encode(
+            SuiteOffer(offer.nonce, offer.supportedSuites.reversed(), offer.minimumSuite),
+        )
+        // The joiner saw the reordered offer; the inviter bound the original.
+        val joinerNegotiation = SuiteNegotiator.respond(
+            reordered, provider, resolver, supported = listOf(FakeSuites.FAKE_ID, SuiteId.LEP_HYBRID_2026),
+        )
+        val inviterContext = inviterNegotiation.onAccept(joinerNegotiation.acceptFrame)
+        assertEquals(joinerNegotiation.context.suite.id, inviterContext.suite.id, "same selection on both ends")
 
-        val joiner = CoroutineScope(EmptyCoroutineContext).launchJoiner(wire, joinerKeys, code)
-        val failure = assertFailsWith<PairingException> {
-            PairingFerry.runNegotiatedInviter(wire.inviterChannel, provider, inviterKeys, code, resolver = resolver) { true }
-        }
+        val code = PairingCode.generate(provider)
+        val inviterKeys = DeviceKeys.generate(provider, fake)
+        val joinerKeys = DeviceKeys.generate(provider, fake)
+        val inviter = org.layeredencryption.pairing.Inviter(provider, inviterKeys, code, negotiated = inviterContext)
+        val joiner = org.layeredencryption.pairing.Joiner(provider, joinerKeys, code, negotiated = joinerNegotiation.context)
+
+        val response = joiner.onInviterHello(inviter.hello())
+        val failure = assertFailsWith<PairingException> { inviter.onJoinerResponse(response) }
         assertTrue("MAC" in failure.message.orEmpty(), "must die at authentication, was: ${failure.message}")
-        assertTrue(joiner.await().isFailure)
     }
 
     @Test
@@ -310,7 +335,7 @@ class SuiteNegotiationTest {
             wire, joinerKeys, code, resolver = resolver, policy = PairingSuitePolicy(minimumSuite = FakeSuites.FAKE_ID),
         )
         val inviter = runCatching {
-            PairingFerry.runNegotiatedInviter(wire.inviterChannel, provider, inviterKeys, code, resolver = SuiteRegistry) { true }
+            PairingFerry.runInviter(wire.inviterChannel, provider, inviterKeys, code, resolver = SuiteRegistry) { true }
         }
         val joinerOutcome = joiner.await()
 
@@ -327,31 +352,35 @@ class SuiteNegotiationTest {
     }
 
     @Test
-    fun negotiatedFlow_isDomainSeparatedFromLegacyEvenUnderSuite1() {
-        // Identical classic fields, identical shared secret: the negotiated transcript and the
-        // key it derives must still differ from legacy, because the labels and the bound
-        // offer/accept frames differ. A transcript from one flow can never authenticate the other.
-        val negotiation = SuiteNegotiator.beginInviter(provider, SuiteRegistry)
-        val accepted = SuiteNegotiator.respond(negotiation.offerFrame, provider, SuiteRegistry)
-        val context = negotiation.onAccept(accepted.acceptFrame)
+    fun distinctNegotiations_deriveDistinctTranscriptsAndKeys() {
+        // Identical classic fields, identical shared secret: two different negotiation runs must
+        // still yield different transcripts and handshake keys, because the raw offer/accept
+        // frames (fresh nonces included) are bound into both — a transcript from one ceremony
+        // can never authenticate another.
+        fun context(): org.layeredencryption.pairing.NegotiatedSuiteContext {
+            val negotiation = SuiteNegotiator.beginInviter(provider, SuiteRegistry)
+            val accepted = SuiteNegotiator.respond(negotiation.offerFrame, provider, SuiteRegistry)
+            return negotiation.onAccept(accepted.acceptFrame)
+        }
 
         val kemKeyPair = Suite1.kem.generateKeyPair(provider)
         val identity = DeviceKeys.generate(provider).identity.serialise()
         val ciphertext = Suite1.kem.encapsulate(provider, kemKeyPair.publicKey)
         val commitment = provider.randomBytes(32)
 
-        val legacy = org.layeredencryption.pairing.PairingTranscript(
+        val first = org.layeredencryption.pairing.PairingTranscript(
             kemKeyPair.publicKey, identity, ciphertext.ciphertext, identity, commitment,
+            negotiated = context(),
         )
-        val negotiated = org.layeredencryption.pairing.PairingTranscript(
+        val second = org.layeredencryption.pairing.PairingTranscript(
             kemKeyPair.publicKey, identity, ciphertext.ciphertext, identity, commitment,
-            negotiated = context,
+            negotiated = context(),
         )
-        assertTrue(!legacy.bytes().contentEquals(negotiated.bytes()), "transcripts must differ")
+        assertTrue(!first.bytes().contentEquals(second.bytes()), "transcripts must differ")
 
         val secret = ciphertext.sharedSecret
-        val legacyKey = org.layeredencryption.pairing.Handshake.handshakeKey(provider, secret, legacy)
-        val negotiatedKey = org.layeredencryption.pairing.Handshake.handshakeKey(provider, secret, negotiated)
-        assertTrue(!legacyKey.contentEquals(negotiatedKey), "handshake keys must differ")
+        val firstKey = org.layeredencryption.pairing.Handshake.handshakeKey(provider, secret, first)
+        val secondKey = org.layeredencryption.pairing.Handshake.handshakeKey(provider, secret, second)
+        assertTrue(!firstKey.contentEquals(secondKey), "handshake keys must differ")
     }
 }

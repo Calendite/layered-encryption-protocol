@@ -18,6 +18,7 @@ import org.layeredencryption.membership.MembershipOp
 import org.layeredencryption.pairing.Inviter
 import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
+import org.layeredencryption.pairing.TestNegotiation
 import org.layeredencryption.pairing.PairingException
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -39,6 +40,8 @@ import kotlin.test.assertTrue
 class DiagnosticSecrecyTest {
 
     private val provider: CryptoProvider = BouncyCastleCryptoProvider()
+
+    private val negotiation = TestNegotiation.pair(provider)
 
     private class RecordingSink : DiagnosticSink {
         val events = mutableListOf<LogEvent>()
@@ -83,15 +86,15 @@ class DiagnosticSecrecyTest {
         val code = PairingCode.generate(provider)
         val inviterDevice = DeviceKeys.generate(provider)
         val joinerDevice = DeviceKeys.generate(provider)
-        val inviter = Inviter(provider, inviterDevice, code)
-        val joiner = Joiner(provider, joinerDevice, code)
+        val inviter = Inviter(provider, inviterDevice, code, negotiated = negotiation.first)
+        val joiner = Joiner(provider, joinerDevice, code, negotiated = negotiation.second)
         val response = joiner.onInviterHello(inviter.hello())
         joiner.onInviterConfirm(inviter.onJoinerResponse(response))
         joiner.onInviterComplete(inviter.complete(inviter.confirmSas()), joiner.confirmSas())
         val masterKey = inviter.masterKey()
 
-        val wrongCodeJoiner = Joiner(provider, DeviceKeys.generate(provider), PairingCode.generate(provider))
-        val hostileInviter = Inviter(provider, DeviceKeys.generate(provider), PairingCode.generate(provider))
+        val wrongCodeJoiner = Joiner(provider, DeviceKeys.generate(provider), PairingCode.generate(provider), negotiated = negotiation.second)
+        val hostileInviter = Inviter(provider, DeviceKeys.generate(provider), PairingCode.generate(provider), negotiated = negotiation.first)
         val hostileResponse = wrongCodeJoiner.onInviterHello(hostileInviter.hello())
         runCatching { hostileInviter.onJoinerResponse(hostileResponse) }
 
@@ -183,8 +186,8 @@ class DiagnosticSecrecyTest {
         Diagnostics.uninstall()
 
         val code = PairingCode.generate(provider)
-        val inviter = Inviter(provider, DeviceKeys.generate(provider), code)
-        val joiner = Joiner(provider, DeviceKeys.generate(provider), code)
+        val inviter = Inviter(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.first)
+        val joiner = Joiner(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.second)
         val response = joiner.onInviterHello(inviter.hello())
         joiner.onInviterConfirm(inviter.onJoinerResponse(response))
         joiner.onInviterComplete(inviter.complete(inviter.confirmSas()), joiner.confirmSas())

@@ -7,6 +7,7 @@ import org.layeredencryption.pairing.ExistingCalendar
 import org.layeredencryption.pairing.Inviter
 import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
+import org.layeredencryption.pairing.TestNegotiation
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -25,6 +26,8 @@ class MultiMemberTest {
 
     private val provider: CryptoProvider = BouncyCastleCryptoProvider()
 
+    private val negotiation = TestNegotiation.pair(provider)
+
     /** Runs a full ceremony and returns the joiner, once paired. */
     private fun pair(inviter: Inviter, joiner: Joiner): Joiner {
         val response = joiner.onInviterHello(inviter.hello())
@@ -38,15 +41,16 @@ class MultiMemberTest {
         val owner = DeviceKeys.generate(provider)
         val code = PairingCode.generate(provider)
 
-        val first = Inviter(provider, owner, code)
-        val sarah = pair(first, Joiner(provider, DeviceKeys.generate(provider), code))
+        val first = Inviter(provider, owner, code, negotiated = negotiation.first)
+        val sarah = pair(first, Joiner(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.second))
 
         val secondCode = PairingCode.generate(provider)
         val second = Inviter(
             provider, owner, secondCode,
             existing = ExistingCalendar(first.calendarKeys(), first.membershipLog()!!),
+            negotiated = negotiation.first,
         )
-        val mum = pair(second, Joiner(provider, DeviceKeys.generate(provider), secondCode))
+        val mum = pair(second, Joiner(provider, DeviceKeys.generate(provider), secondCode, negotiated = negotiation.second))
 
         assertContentEquals(first.masterKey(), second.masterKey(), "the calendar must not be re-founded")
         assertContentEquals(first.masterKey(), sarah.masterKey())
@@ -57,13 +61,13 @@ class MultiMemberTest {
     fun `a second invite extends the log rather than starting one`() {
         val owner = DeviceKeys.generate(provider)
         val code = PairingCode.generate(provider)
-        val first = Inviter(provider, owner, code)
-        pair(first, Joiner(provider, DeviceKeys.generate(provider), code))
+        val first = Inviter(provider, owner, code, negotiated = negotiation.first)
+        pair(first, Joiner(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.second))
         val afterFirst = first.membershipLog()!!
 
         val secondCode = PairingCode.generate(provider)
-        val second = Inviter(provider, owner, secondCode, ExistingCalendar(first.calendarKeys(), afterFirst))
-        pair(second, Joiner(provider, DeviceKeys.generate(provider), secondCode))
+        val second = Inviter(provider, owner, secondCode, ExistingCalendar(first.calendarKeys(), afterFirst), negotiated = negotiation.first)
+        pair(second, Joiner(provider, DeviceKeys.generate(provider), secondCode, negotiated = negotiation.second))
         val afterSecond = second.membershipLog()!!
 
         assertEquals(2, afterFirst.entries.size, "genesis plus the first ADD")
@@ -84,14 +88,14 @@ class MultiMemberTest {
     fun `an earlier member still opens the calendar after someone else joins`() {
         val owner = DeviceKeys.generate(provider)
         val code = PairingCode.generate(provider)
-        val first = Inviter(provider, owner, code)
+        val first = Inviter(provider, owner, code, negotiated = negotiation.first)
         val sarahKeys = DeviceKeys.generate(provider)
-        val sarah = pair(first, Joiner(provider, sarahKeys, code))
+        val sarah = pair(first, Joiner(provider, sarahKeys, code, negotiated = negotiation.second))
         val sarahKey = sarah.masterKey()
 
         val secondCode = PairingCode.generate(provider)
-        val second = Inviter(provider, owner, secondCode, ExistingCalendar(first.calendarKeys(), first.membershipLog()!!))
-        pair(second, Joiner(provider, DeviceKeys.generate(provider), secondCode))
+        val second = Inviter(provider, owner, secondCode, ExistingCalendar(first.calendarKeys(), first.membershipLog()!!), negotiated = negotiation.first)
+        pair(second, Joiner(provider, DeviceKeys.generate(provider), secondCode, negotiated = negotiation.second))
 
         // Sarah's ADD entry is still present and still hers in the grown log.
         val entry = second.membershipLog()!!.addEntryFor(sarahKeys.identity.signingPublicKey)
@@ -103,9 +107,9 @@ class MultiMemberTest {
     fun `a member added by someone else is admitted, not treated as a stranger`() {
         val owner = DeviceKeys.generate(provider)
         val code = PairingCode.generate(provider)
-        val first = Inviter(provider, owner, code)
+        val first = Inviter(provider, owner, code, negotiated = negotiation.first)
         val sarahKeys = DeviceKeys.generate(provider)
-        pair(first, Joiner(provider, sarahKeys, code))
+        pair(first, Joiner(provider, sarahKeys, code, negotiated = negotiation.second))
 
         // Sarah, an ordinary member rather than the founder, adds Mum.
         val mumKeys = DeviceKeys.generate(provider)
@@ -128,8 +132,8 @@ class MultiMemberTest {
     fun `a log extends itself but not a fork`() {
         val owner = DeviceKeys.generate(provider)
         val code = PairingCode.generate(provider)
-        val first = Inviter(provider, owner, code)
-        pair(first, Joiner(provider, DeviceKeys.generate(provider), code))
+        val first = Inviter(provider, owner, code, negotiated = negotiation.first)
+        pair(first, Joiner(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.second))
         val base = first.membershipLog()!!
 
         val extended = base.append(
@@ -154,13 +158,13 @@ class MultiMemberTest {
     fun `an unrelated log is never an extension`() {
         val ownerA = DeviceKeys.generate(provider)
         val codeA = PairingCode.generate(provider)
-        val a = Inviter(provider, ownerA, codeA)
-        pair(a, Joiner(provider, DeviceKeys.generate(provider), codeA))
+        val a = Inviter(provider, ownerA, codeA, negotiated = negotiation.first)
+        pair(a, Joiner(provider, DeviceKeys.generate(provider), codeA, negotiated = negotiation.second))
 
         val ownerB = DeviceKeys.generate(provider)
         val codeB = PairingCode.generate(provider)
-        val b = Inviter(provider, ownerB, codeB)
-        pair(b, Joiner(provider, DeviceKeys.generate(provider), codeB))
+        val b = Inviter(provider, ownerB, codeB, negotiated = negotiation.first)
+        pair(b, Joiner(provider, DeviceKeys.generate(provider), codeB, negotiated = negotiation.second))
         val longerB = b.membershipLog()!!.append(
             provider, MembershipOp.ADD, DeviceKeys.generate(provider).identity,
             wrappedKeys = null, signer = ownerB.signingKeyPair,

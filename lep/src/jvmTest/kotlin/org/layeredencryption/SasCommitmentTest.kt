@@ -7,6 +7,7 @@ import org.layeredencryption.pairing.InviterConfirm
 import org.layeredencryption.pairing.InviterHello
 import org.layeredencryption.pairing.Joiner
 import org.layeredencryption.pairing.PairingCode
+import org.layeredencryption.pairing.TestNegotiation
 import org.layeredencryption.pairing.PairingException
 import org.layeredencryption.pairing.PairingTranscript
 import kotlin.test.Test
@@ -32,10 +33,12 @@ class SasCommitmentTest {
 
     private val provider: CryptoProvider = BouncyCastleCryptoProvider()
 
+    private val negotiation = TestNegotiation.pair(provider)
+
     private fun pair(): Triple<Inviter, Joiner, PairingCode> {
         val code = PairingCode.generate(provider)
-        val inviter = Inviter(provider, DeviceKeys.generate(provider), code)
-        val joiner = Joiner(provider, DeviceKeys.generate(provider), code)
+        val inviter = Inviter(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.first)
+        val joiner = Joiner(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.second)
         return Triple(inviter, joiner, code)
     }
 
@@ -78,7 +81,7 @@ class SasCommitmentTest {
         val inviterDevice = DeviceKeys.generate(provider)
         val joinerDevice = DeviceKeys.generate(provider)
         val code = PairingCode.generate(provider)
-        val inviter = Inviter(provider, inviterDevice, code)
+        val inviter = Inviter(provider, inviterDevice, code, negotiated = negotiation.first)
         val hello = inviter.hello()
 
         // What an attacker holds after the hello: everything except the nonce behind the commitment.
@@ -92,6 +95,7 @@ class SasCommitmentTest {
                 kemCiphertext = encapsulation.ciphertext,
                 joinerDeviceIdentity = joinerDevice.identity.serialise(),
                 sasCommitment = hello.sasCommitment,
+                negotiated = negotiation.first,
             )
             // The best an attacker can do is guess a nonce; the real one is still committed.
             val guessedNonce = provider.randomBytes(Handshake.SAS_NONCE_SIZE)
@@ -122,8 +126,8 @@ class SasCommitmentTest {
     @Test
     fun `rewriting the commitment in flight breaks the MAC`() {
         val code = PairingCode.generate(provider)
-        val inviter = Inviter(provider, DeviceKeys.generate(provider), code)
-        val joiner = Joiner(provider, DeviceKeys.generate(provider), code)
+        val inviter = Inviter(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.first)
+        val joiner = Joiner(provider, DeviceKeys.generate(provider), code, negotiated = negotiation.second)
 
         val hello = inviter.hello()
         val tampered = InviterHello(

@@ -8,6 +8,8 @@ import org.layeredencryption.identity.DeviceIdentity
 import org.layeredencryption.membership.MembershipLog
 import org.layeredencryption.suite.Suite1
 import org.layeredencryption.suite.SuiteId
+import org.layeredencryption.suite.SuiteRegistry
+import org.layeredencryption.suite.SuiteResolver
 
 /**
  * Wire encodings for the pairing ceremony (docs/Protocol.md §6.3).
@@ -79,13 +81,14 @@ object PairingWire {
         .putBytes(message.sasCommitment)
         .toByteArray()
 
-    fun decodeInviterHello(frame: ByteArray): InviterHello = expect(frame, TAG_INVITER_HELLO, exactBytes = INVITER_HELLO_BYTES) { reader ->
-        InviterHello(
-            sized(reader.readBytes(XWing.PUBLIC_KEY_SIZE), XWing.PUBLIC_KEY_SIZE),
-            DeviceIdentity.deserialise(reader.readBytes(IDENTITY_BYTES)),
-            sized(reader.readBytes(SAS_COMMITMENT_BYTES), SAS_COMMITMENT_BYTES),
-        )
-    }
+    fun decodeInviterHello(frame: ByteArray, resolver: SuiteResolver = SuiteRegistry): InviterHello =
+        expect(frame, TAG_INVITER_HELLO, exactBytes = INVITER_HELLO_BYTES) { reader ->
+            InviterHello(
+                sized(reader.readBytes(XWing.PUBLIC_KEY_SIZE), XWing.PUBLIC_KEY_SIZE),
+                DeviceIdentity.deserialise(reader.readBytes(IDENTITY_BYTES), resolver),
+                sized(reader.readBytes(SAS_COMMITMENT_BYTES), SAS_COMMITMENT_BYTES),
+            )
+        }
 
     fun encode(message: JoinerResponse): ByteArray = FrameWriter()
         .putByte(TAG_JOINER_RESPONSE)
@@ -94,13 +97,14 @@ object PairingWire {
         .putBytes(message.joinerMac)
         .toByteArray()
 
-    fun decodeJoinerResponse(frame: ByteArray): JoinerResponse = expect(frame, TAG_JOINER_RESPONSE, exactBytes = JOINER_RESPONSE_BYTES) { reader ->
-        JoinerResponse(
-            sized(reader.readBytes(XWing.CIPHERTEXT_SIZE), XWing.CIPHERTEXT_SIZE),
-            DeviceIdentity.deserialise(reader.readBytes(IDENTITY_BYTES)),
-            sized(reader.readBytes(MAC_BYTES), MAC_BYTES),
-        )
-    }
+    fun decodeJoinerResponse(frame: ByteArray, resolver: SuiteResolver = SuiteRegistry): JoinerResponse =
+        expect(frame, TAG_JOINER_RESPONSE, exactBytes = JOINER_RESPONSE_BYTES) { reader ->
+            JoinerResponse(
+                sized(reader.readBytes(XWing.CIPHERTEXT_SIZE), XWing.CIPHERTEXT_SIZE),
+                DeviceIdentity.deserialise(reader.readBytes(IDENTITY_BYTES), resolver),
+                sized(reader.readBytes(MAC_BYTES), MAC_BYTES),
+            )
+        }
 
     fun encode(message: InviterConfirm): ByteArray = FrameWriter()
         .putByte(TAG_INVITER_CONFIRM)
