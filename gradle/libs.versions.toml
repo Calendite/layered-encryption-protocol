@@ -1,6 +1,6 @@
 [versions]
 kotlin = "2.3.20"
-agp = "8.13.2"
+agp = "9.1.1"
 bouncycastle = "1.85.2"
 kotlinxCoroutines = "1.8.0"
 androidCompileSdk = "35"
