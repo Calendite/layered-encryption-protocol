@@ -24,7 +24,10 @@ val diagnostics = listOf("../kmp-diagnostics", "kmp-diagnostics").firstOrNull { 
         "kmp-diagnostics not found: clone github.com/Calendite/kmp-diagnostics next to this " +
             "repository (or into ./kmp-diagnostics)",
     )
-includeBuild(diagnostics)
+// The real path, not the link: a worktree reaches kmp-diagnostics through a symlink, and an app
+// that includes both this repo and kmp-diagnostics by its real path would otherwise see two builds
+// of the same name.
+includeBuild(file(diagnostics).canonicalFile)
 
 include(":lep")
 include(":playground")
