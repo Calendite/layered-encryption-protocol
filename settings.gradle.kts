@@ -26,8 +26,8 @@ val diagnostics = listOf("../kmp-diagnostics", "kmp-diagnostics").firstOrNull { 
     )
 // The real path, not the link: a worktree reaches kmp-diagnostics through a symlink, and an app
 // that includes both this repo and kmp-diagnostics by its real path would otherwise see two builds
-// of the same name.
-includeBuild(file(diagnostics).canonicalFile)
+// of the same name. Named after the repo, not the folder: a worktree's folder is its branch.
+includeBuild(file(diagnostics).canonicalFile) { name = "kmp-diagnostics" }
 
 include(":lep")
 include(":playground")
