@@ -61,7 +61,7 @@ jobs:
             fuzz/build/reports/tests/
 
   ios-compile:
-    name: iOS compiles
+    name: iOS compiles, macOS provider tested
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -85,6 +85,12 @@ jobs:
           key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
       - name: Compile the iOS target
         run: ./gradlew :lep:compileKotlinIosArm64 --console=plain
+      # The macOS provider: Bouncy Castle parity vectors and the conformance suite on
+      # Kotlin/Native, then the vendored C under AddressSanitizer and UBSan.
+      - name: Test the macOS provider
+        run: |
+          ./gradlew :lep:macosArm64Test --console=plain
+          lep/native/test/sanitize.sh
 
   dependency-review:
     name: Dependency review

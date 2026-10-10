@@ -1,0 +1,6 @@
+package = org.layeredencryption.native
+headers = lep_native.h lep_cryptokit.h
+headerFilter = lep_native.h lep_cryptokit.h
+staticLibraries = liblepnative.a libLepCryptoKit.a
+# The Swift half needs the Swift runtime (in the OS since macOS 10.14.4) and CryptoKit.
+linkerOpts = -L/usr/lib/swift -framework CryptoKit -framework Foundation

@@ -7,6 +7,8 @@ plugins {
 group = "org.layeredencryption"
 version = "0.1.0"
 
+val lepNativeOutput = layout.buildDirectory.dir("lep-native/macosArm64")
+
 kotlin {
     androidTarget {
         publishLibraryVariants("release")
@@ -15,6 +17,20 @@ kotlin {
     iosX64()
     iosArm64()
     iosSimulatorArm64()
+
+    // Calendite's background daemons run on the Mac as Kotlin/Native. The provider binds vendored
+    // C (ML-KEM, ML-DSA, Ed25519, SHA-3) and CryptoKit (the AEADs, X25519), built by
+    // native/build.sh; see native/README.md for why each primitive comes from where it does.
+    macosArm64 {
+        compilations.getByName("main").cinterops.create("lepnative") {
+            defFile(file("src/nativeInterop/cinterop/lepnative.def"))
+            includeDirs(file("native/include"))
+            extraOpts("-libraryPath", lepNativeOutput.get().asFile.path)
+            // cinterop asks `xcodebuild -version` only to check the Xcode version; the Command
+            // Line Tools have everything it actually uses, and no xcodebuild.
+            extraOpts("-Xoverride-konan-properties", "ignoreXcodeVersionCheck=true")
+        }
+    }
 
     @OptIn(org.jetbrains.kotlin.gradle.ExperimentalWasmDsl::class)
     wasmJs { browser() }
@@ -60,6 +76,36 @@ kotlin {
             }
         }
     }
+}
+
+// The native libraries cinterop embeds. Registered on a Mac only: elsewhere Kotlin/Native skips
+// the Apple targets anyway, and xcrun does not exist.
+if (System.getProperty("os.name").startsWith("Mac")) {
+    val buildLepNative = tasks.register<Exec>("buildLepNativeMacosArm64") {
+        description = "Builds the vendored C and CryptoKit wrappers the macOS CryptoProvider binds."
+        val native = layout.projectDirectory.dir("native")
+        inputs.dir(native).withPropertyName("nativeSources")
+        outputs.dir(lepNativeOutput).withPropertyName("nativeLibraries")
+        commandLine(native.file("build.sh").asFile.path, lepNativeOutput.get().asFile.path)
+    }
+    tasks.named("cinteropLepnativeMacosArm64") {
+        // cinterop copies the static libraries into its klib but does not count them as inputs,
+        // so without this a rebuilt library is silently linked as the previous one.
+        inputs.files(buildLepNative).withPropertyName("nativeLibraries")
+    }
+}
+
+// Bouncy Castle parity vectors (test-vectors/README.md): written and guarded by the JVM tests,
+// replayed against every other provider. -Plep.parity.regenerate rewrites the file.
+val parityVectors = layout.projectDirectory.file("test-vectors/bouncycastle-parity.txt")
+tasks.named<Test>("jvmTest") {
+    systemProperty("lep.parity.vectors", parityVectors.asFile.path)
+    if (providers.gradleProperty("lep.parity.regenerate").isPresent) systemProperty("lep.parity.regenerate", "true")
+    inputs.files(parityVectors).withPropertyName("parityVectors")
+}
+tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeTest>().configureEach {
+    environment("LEP_PARITY_VECTORS", parityVectors.asFile.path)
+    inputs.files(parityVectors).withPropertyName("parityVectors")
 }
 
 android {

@@ -1,0 +1,11 @@
+_lep_sha3_256
+_lep_shake256
+_lep_mlkem768_keypair_derand
+_lep_mlkem768_enc_derand
+_lep_mlkem768_dec
+_lep_mldsa65_keypair_derand
+_lep_mldsa65_sign_derand
+_lep_mldsa65_verify
+_lep_ed25519_public_key
+_lep_ed25519_sign
+_lep_ed25519_verify
