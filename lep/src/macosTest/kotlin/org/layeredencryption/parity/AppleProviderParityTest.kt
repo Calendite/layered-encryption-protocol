@@ -26,39 +26,18 @@ import kotlin.test.assertTrue
  * lep/test-vectors/bouncycastle-parity.txt (recorded on the JVM by BouncyCastleParityVectorsTest)
  * with the recorded randomness, and requires the same bytes, the same accept/reject, the same
  * kind of failure, and the same randomness draws in the same sizes and order.
- *
- * Except for [divergences]: two inputs LEP never produces, where this provider is deliberately
- * stricter than Bouncy Castle. Each is pinned to the exact number of recorded cases it covers.
  */
 class AppleProviderParityTest {
 
-    private val divergences = listOf(
-        Divergence(
-            op = "aes_seal",
-            result = "throws:error",
-            reason = "AES-GCM nonces of 1-11 bytes: Bouncy Castle derives a counter block from them (GHASH); " +
-                "CryptoKit only takes 12 or more. LEP's only AES-GCM caller, Cascade, always uses 12.",
-        ) { args -> args[1].length / 2 in 1..11 },
-        Divergence(
-            op = "mldsa_sign",
-            result = "throws:error",
-            reason = "An ML-DSA-65 private key that is not 4032 bytes: Bouncy Castle pads or truncates it and signs " +
-                "anyway; this provider refuses, rather than sign with a key that is not the one stored.",
-        ) { args -> args[0].length / 2 != 4032 && args[0].isNotEmpty() },
-    )
-
     @Test
     fun matchesBouncyCastleOnEveryRecordedCase() {
-        val report = ParityRunner.run(readVectors(), divergences) { replay ->
+        val report = ParityRunner.run(readVectors()) { replay ->
             AppleCryptoProvider(RandomSource { bytes -> replay.nextBytes(bytes.size).copyInto(bytes) })
         }
         println("Apple provider parity: ${report.cases} cases over ${report.byOp.size} operations, ${report.failures.size} disagreements")
         report.byOp.entries.sortedBy { it.key }.forEach { (op, n) -> println("  $op: $n") }
-        report.divergent.forEach { (d, n) -> println("  deliberate difference, ${d.op} ($n cases): ${d.reason}") }
         assertTrue(report.cases > 2000, "suspiciously few cases: ${report.cases}")
         assertEquals("", report.failures.joinToString("\n"))
-        // Pinned, so a new case cannot quietly fall under a difference: grow these only on purpose.
-        assertEquals(listOf(3, 2), divergences.map { report.divergent.getValue(it) })
     }
 
     /** The control: one wrong byte in a recorded result fails this provider too, so a pass means something. */

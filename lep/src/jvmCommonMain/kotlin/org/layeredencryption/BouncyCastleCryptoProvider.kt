@@ -89,8 +89,15 @@ class BouncyCastleCryptoProvider(
     override fun chaCha20Poly1305Open(key: ByteArray, nonce: ByteArray, ciphertextAndTag: ByteArray, aad: ByteArray): ByteArray =
         aeadOpen("ChaCha20-Poly1305", SecretKeySpec(key, "ChaCha20"), IvParameterSpec(nonce), ciphertextAndTag, aad)
 
-    override fun aes256GcmSeal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray): ByteArray =
-        aeadSeal("AES/GCM/NoPadding", SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_BITS, nonce), plaintext, aad)
+    /**
+     * Nonces under 12 bytes are refused, although GCM can take them: they make two messages
+     * sharing a counter block likelier, LEP only ever uses 12, and every provider refuses them
+     * alike (the macOS one has no choice, CryptoKit taking 12 or more). Opening is unchanged.
+     */
+    override fun aes256GcmSeal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray): ByteArray {
+        require(nonce.size >= GCM_MIN_NONCE_BYTES) { "AES-GCM nonce must be at least $GCM_MIN_NONCE_BYTES bytes" }
+        return aeadSeal("AES/GCM/NoPadding", SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_BITS, nonce), plaintext, aad)
+    }
 
     override fun aes256GcmOpen(key: ByteArray, nonce: ByteArray, ciphertextAndTag: ByteArray, aad: ByteArray): ByteArray =
         aeadOpen("AES/GCM/NoPadding", SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_BITS, nonce), ciphertextAndTag, aad)
@@ -179,7 +186,13 @@ class BouncyCastleCryptoProvider(
         )
     }
 
+    /**
+     * Refuses a private key that is not exactly [ML_DSA_65_PRIVATE_KEY_SIZE] bytes: Bouncy Castle
+     * would pad or truncate it and sign with a key that is not the one stored, which nobody could
+     * verify. Verifying is unchanged.
+     */
     override fun mlDsa65Sign(privateKey: ByteArray, message: ByteArray): ByteArray {
+        require(privateKey.size == ML_DSA_65_PRIVATE_KEY_SIZE) { "ML-DSA-65 private key must be $ML_DSA_65_PRIVATE_KEY_SIZE bytes" }
         val signer = MLDSASigner()
         signer.init(true, MLDSAPrivateKeyParameters(MLDSAParameters.ml_dsa_65, privateKey))
         signer.update(message, 0, message.size)
@@ -232,6 +245,8 @@ class BouncyCastleCryptoProvider(
 
     private companion object {
         const val GCM_TAG_BITS = 128
+        const val GCM_MIN_NONCE_BYTES = 12
+        const val ML_DSA_65_PRIVATE_KEY_SIZE = 4032
     }
 
     /** Replays fixed bytes as a [SecureRandom], for deterministic seed-based key generation. */

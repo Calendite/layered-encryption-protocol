@@ -68,8 +68,11 @@ internal class NobleCryptoProvider : CryptoProvider {
             chaCha(key, nonce, aad).decrypt(ciphertextAndTag.toUint8Array()).toByteArray()
         }
 
-    override fun aes256GcmSeal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray): ByteArray =
-        gcm(key, nonce, aad).encrypt(plaintext.toUint8Array()).toByteArray()
+    /** Refuses nonces under 12 bytes, as every provider does (see BouncyCastleCryptoProvider). */
+    override fun aes256GcmSeal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray): ByteArray {
+        require(nonce.size >= 12) { "AES-GCM nonce must be at least 12 bytes" }
+        return gcm(key, nonce, aad).encrypt(plaintext.toUint8Array()).toByteArray()
+    }
 
     override fun aes256GcmOpen(key: ByteArray, nonce: ByteArray, ciphertextAndTag: ByteArray, aad: ByteArray): ByteArray =
         failClosed("AES-256-GCM") {
@@ -133,8 +136,11 @@ internal class NobleCryptoProvider : CryptoProvider {
         return KeyPair(publicKey = keys.publicKey.toByteArray(), privateKey = keys.secretKey.toByteArray())
     }
 
-    override fun mlDsa65Sign(privateKey: ByteArray, message: ByteArray): ByteArray =
-        NoblePqDsa.ml_dsa65.sign(message.toUint8Array(), privateKey.toUint8Array()).toByteArray()
+    /** Refuses a private key that is not exactly 4032 bytes, as every provider does. */
+    override fun mlDsa65Sign(privateKey: ByteArray, message: ByteArray): ByteArray {
+        require(privateKey.size == 4032) { "ML-DSA-65 private key must be 4032 bytes" }
+        return NoblePqDsa.ml_dsa65.sign(message.toUint8Array(), privateKey.toUint8Array()).toByteArray()
+    }
 
     override fun mlDsa65Verify(publicKey: ByteArray, message: ByteArray, signature: ByteArray): Boolean =
         rejectOnError {

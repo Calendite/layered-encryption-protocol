@@ -173,8 +173,7 @@ class AppleCryptoProvider(
 
     override fun aes256GcmSeal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray): ByteArray {
         require(key.size in AES_KEY_SIZES) { "AES key must be 16, 24 or 32 bytes" }
-        // Bouncy Castle also takes 1-11 byte nonces; CryptoKit does not. LEP only uses 12
-        // (Cascade), and the parity test records this as a deliberate difference.
+        // As every provider: CryptoKit takes 12 or more, and LEP only ever uses 12 (Cascade).
         require(nonce.size >= 12) { "AES-GCM nonce must be at least 12 bytes" }
         return seal(key, nonce, plaintext, aad, ::lep_ck_aes_gcm_seal, "AES/GCM/NoPadding")
     }

@@ -26,16 +26,12 @@ lep/src/commonTest/.../parity/ParityVectors.kt.
 - `AppleProviderParityTest` (macosArm64Test): `AppleCryptoProvider` replays it, with a tamper
   control of its own.
 
-## Deliberate differences
+## No exceptions
 
-`AppleProviderParityTest` holds the macOS provider to a different result in exactly two places.
-Both are inputs LEP never produces, where it is stricter than Bouncy Castle. Each is pinned to the
-number of cases it covers:
-
-- **AES-GCM nonces of 1-11 bytes**: Bouncy Castle accepts them; CryptoKit only takes 12 or more.
-  The cascade, LEP's only AES-GCM caller, always uses 12.
-- **ML-DSA-65 private keys that are not 4032 bytes**: Bouncy Castle pads or truncates them and
-  signs anyway; the macOS provider refuses.
+Every provider refuses the same two inputs Bouncy Castle used to accept and LEP never produces:
+AES-GCM nonces under 12 bytes (when sealing) and ML-DSA-65 private keys that are not 4032 bytes
+(when signing). So the vectors hold the macOS provider to every recorded case, with none excused.
+`Divergence` in ParityVectors.kt remains for a future provider that genuinely cannot match.
 
 ## Regenerating
 
