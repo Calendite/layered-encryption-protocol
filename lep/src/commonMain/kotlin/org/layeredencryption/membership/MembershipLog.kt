@@ -547,6 +547,40 @@ class MembershipLog private constructor(
     }
 
     /**
+     * Every rotated context key this log hands [device], by the epoch it starts.
+     *
+     * Unlike [rotatedKeysFor], numbered by the log itself: every entry that advances the epoch counts,
+     * whether or not [device] was one of its recipients. So a device that joined at epoch 3 and was
+     * handed only that key still files the next rotation under epoch 4, where counting what it could
+     * open would have called it epoch 1 and thrown it away.
+     */
+    fun rotatedKeysByEpoch(
+        provider: CryptoProvider,
+        device: DeviceKeys,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
+    ): Map<Int, ByteArray> {
+        val keys = mutableMapOf<Int, ByteArray>()
+        var epoch = 0
+        var era = resolver.require(entriesSnapshot.first().deviceIdentity.suiteId)
+        for (entry in entriesSnapshot) {
+            if (!advancesEpoch(entry)) continue
+            epoch++
+            val opened = when (entry.op) {
+                MembershipOp.SUITE_UPGRADE -> {
+                    val payload = entry.wrappedKeys?.let { SuiteUpgradePayload.parse(it) } ?: continue
+                    if (!resolver.contains(payload.newSuite)) continue
+                    era = resolver.require(payload.newSuite)
+                    WrappedKeys.unwrapFor(provider, era, payload.wrappedKeys, device, namespace)
+                }
+                else -> entry.wrappedKeys?.let { WrappedKeys.unwrapFor(provider, era, it, device, namespace) }
+            }
+            opened?.let { keys[epoch] = it }
+        }
+        return keys
+    }
+
+    /**
      * The founding entry's hash, or null for an empty log.
      *
      * The one value in a calendar that is fixed for its whole life: entries are only ever appended,
