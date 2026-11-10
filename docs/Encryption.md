@@ -256,7 +256,9 @@ directory and no key server, so there is nothing to impersonate.
 ## 7. Membership, and removing somebody
 
 An append-only, hash-chained log. Devices are added and revoked by entries signed by a device that
-was already a member; any active member may sign, not only the founder.
+was already a member. Who may add depends on the context's rules version (Protocol.md §4.7): under
+rules 1, only the founder adds, and only the founder may remove itself; under rules 2, any active
+member may add or remove anyone, the founder included. Any member may always remove anyone else.
 
 ```
 entry      = { prev_hash, op, device_identity, wrapped_keys?, signer_pk, sig }

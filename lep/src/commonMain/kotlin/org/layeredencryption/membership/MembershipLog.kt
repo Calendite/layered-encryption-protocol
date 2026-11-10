@@ -43,6 +43,15 @@ enum class MembershipOp(val code: Int) {
      * a device must update before its context upgrades). Transitions are monotonic in suite id.
      */
     SUITE_UPGRADE(4),
+
+    /**
+     * Moves the context to a newer set of membership rules ([MembershipRules]). The subject is the
+     * signer, the founding device; the payload is the new rules version, one byte. Changes no
+     * members and no keys. Rules only ever move forward, and a verifier that does not know this op
+     * fails closed on the whole log, which is the intent: every device must understand the rules
+     * its context lives under.
+     */
+    RULES(5),
     ;
 
     companion object {
@@ -138,6 +147,29 @@ sealed interface ForkResolution {
      * position does not resolve forks, it gets re-invited.
      */
     data object ResolverExcluded : ForkResolution
+}
+
+/**
+ * Which membership rules a context lives under, moved forward by a [MembershipOp.RULES] entry.
+ *
+ * - [FOUNDER_ONLY] (1, every context until it says otherwise): only the founding device may add
+ *   members, and only it may revoke itself (LEP-R3).
+ * - [ANY_MEMBER] (2): any active member may add, and any member may revoke any other, the founder
+ *   included. Safe because adding someone no longer grants them anyone's calendar: under calendar
+ *   keys each owner hands theirs over separately (Calendar_Keys_And_Consent.md). It also means a
+ *   context whose founder is lost can still admit and remove people.
+ */
+object MembershipRules {
+    const val FOUNDER_ONLY = 1
+    const val ANY_MEMBER = 2
+
+    /** The newest rules this library understands; a [MembershipOp.RULES] entry above it fails verification. */
+    const val CURRENT = ANY_MEMBER
+
+    internal fun payload(version: Int): ByteArray = byteArrayOf(version.toByte())
+
+    /** The version a RULES entry's payload names, or null when it is not exactly one byte. */
+    internal fun parse(payload: ByteArray?): Int? = payload?.takeIf { it.size == 1 }?.let { it[0].toInt() and 0xFF }
 }
 
 /**
@@ -355,7 +387,7 @@ class MembershipLog private constructor(
             when (entry.op) {
                 MembershipOp.ADD -> active[key] = entry.deviceIdentity
                 MembershipOp.REVOKE -> active.remove(key)
-                MembershipOp.ROTATE, MembershipOp.SUITE_UPGRADE -> Unit
+                MembershipOp.ROTATE, MembershipOp.SUITE_UPGRADE, MembershipOp.RULES -> Unit
             }
         }
         return active.values.toList()
@@ -507,7 +539,8 @@ class MembershipLog private constructor(
                         ?.let { keys += it }
                     era = newEra
                 }
-                MembershipOp.ADD -> Unit
+                // An ADD's keys are the joiner's ceremony material, a RULES entry carries a version.
+                MembershipOp.ADD, MembershipOp.RULES -> Unit
             }
         }
         return keys
@@ -803,6 +836,7 @@ class MembershipLog private constructor(
         }
         var activeSuite = resolver.require(foundingSuiteId)
         var epoch = 0
+        var rules = MembershipRules.FOUNDER_ONLY
 
         entriesSnapshot.forEachIndexed { index, entry ->
             if (!entry.previousHash.contentEquals(expectedPrevious)) {
@@ -827,7 +861,7 @@ class MembershipLog private constructor(
             ) {
                 return MembershipVerification.Invalid("A keyless revocation batch must terminate in its rotation", index)
             }
-            val authorisationFailure = checkAuthorisation(index, entry, members, activeSuite)
+            val authorisationFailure = checkAuthorisation(index, entry, members, activeSuite, rules)
             if (authorisationFailure != null) {
                 Diagnostics.debug(LepTag.MEMBERSHIP) { "log invalid at entry $index: $authorisationFailure" }
                 return MembershipVerification.Invalid(authorisationFailure, index)
@@ -844,6 +878,7 @@ class MembershipLog private constructor(
             }
 
             applyOp(entry, members)
+            if (entry.op == MembershipOp.RULES) rules = MembershipRules.parse(entry.wrappedKeys) ?: rules
             if (advancesEpoch(entry)) epoch += 1
             nextSuite?.let { activeSuite = it }
             inKeylessBatch = entry.op == MembershipOp.REVOKE && !entry.hasWrappedKeys
@@ -869,7 +904,13 @@ class MembershipLog private constructor(
         return writer.toByteArray()
     }
 
-    private fun checkAuthorisation(index: Int, entry: MembershipEntry, members: Set<String>, activeSuite: ProtocolSuite): String? {
+    private fun checkAuthorisation(
+        index: Int,
+        entry: MembershipEntry,
+        members: Set<String>,
+        activeSuite: ProtocolSuite,
+        rules: Int,
+    ): String? {
         if (index == 0) {
             if (entry.op != MembershipOp.ADD) return "Genesis entry must be ADD"
             if (!entry.signerPublicKey.contentEquals(entry.deviceIdentity.signingPublicKey)) {
@@ -894,7 +935,9 @@ class MembershipLog private constructor(
                 // invited to this calendar cannot invite further people into it, and — the
                 // security consequence — a *compromised* guest device cannot mint attacker
                 // identities that would survive its own revocation.
-                if (!isOwner) return "Only the founding device may add members"
+                // Under ANY_MEMBER rules a member may add: joining grants no calendar any more, each
+                // owner hands theirs over separately, so a rogue addition reads nothing.
+                if (!isOwner && rules < MembershipRules.ANY_MEMBER) return "Only the founding device may add members"
                 if (subject in members) return "Re-adding an active member"
                 // The cap is a verification rule, not advice (LEP-R4): a context that grew past
                 // the point where one rotation can wrap for everyone could not be revoked from,
@@ -915,7 +958,11 @@ class MembershipLog private constructor(
                 // owner can undo. But the founder is different now that it alone can admit
                 // members: letting a guest revoke it would leave the calendar permanently unable
                 // to admit anyone, a denial the ADD restriction would itself have created.
-                if (subject == ownerHex && subject != signer) return "Only the founding device may revoke itself"
+                // Under ANY_MEMBER rules the founder admits no one the others cannot, so it can be
+                // removed like anyone else; otherwise a lost founder's phone could never be.
+                if (subject == ownerHex && subject != signer && rules < MembershipRules.ANY_MEMBER) {
+                    return "Only the founding device may revoke itself"
+                }
                 if (subject !in members) return "Revoking a non-member"
                 if (entry.hasWrappedKeys) {
                     checkRecipients(entry, members - subject, "Revocation", activeSuite)?.let { return it }
@@ -934,6 +981,15 @@ class MembershipLog private constructor(
             // [checkSuiteUpgrade], which needs the walk's suite and epoch state.
             MembershipOp.SUITE_UPGRADE -> {
                 if (subject != entry.signerPublicKey.toHexString()) return "Suite upgrade subject must be its signer"
+            }
+            // Relaxing who may add is the founder's to give up, and it can only be given up, never
+            // taken back: rules move forward one entry at a time, to versions this library knows.
+            MembershipOp.RULES -> {
+                if (subject != signer) return "Rules subject must be its signer"
+                if (!isOwner) return "Only the founding device may change the rules"
+                val version = MembershipRules.parse(entry.wrappedKeys) ?: return "Rules entry must name one version"
+                if (version <= rules) return "Rules may only move forward"
+                if (version > MembershipRules.CURRENT) return "Unknown rules version $version"
             }
         }
         return null
@@ -997,7 +1053,7 @@ class MembershipLog private constructor(
         when (entry.op) {
             MembershipOp.ADD -> members.add(deviceKey)
             MembershipOp.REVOKE -> members.remove(deviceKey)
-            MembershipOp.ROTATE, MembershipOp.SUITE_UPGRADE -> Unit
+            MembershipOp.ROTATE, MembershipOp.SUITE_UPGRADE, MembershipOp.RULES -> Unit
         }
     }
 
@@ -1006,7 +1062,38 @@ class MembershipLog private constructor(
         MembershipOp.ADD -> false
         MembershipOp.REVOKE -> entry.hasWrappedKeys
         MembershipOp.ROTATE, MembershipOp.SUITE_UPGRADE -> true
+        MembershipOp.RULES -> false
     }
+
+    /**
+     * The membership rules this log is under ([MembershipRules]): the last [MembershipOp.RULES]
+     * entry's version, or [MembershipRules.FOUNDER_ONLY]. Read without verifying; trust it only on a
+     * log that [verify] accepts.
+     */
+    fun rulesVersion(): Int = entriesSnapshot
+        .lastOrNull { it.op == MembershipOp.RULES }
+        ?.let { MembershipRules.parse(it.wrappedKeys) }
+        ?: MembershipRules.FOUNDER_ONLY
+
+    /**
+     * Moves this context to [version] of the membership rules, signed by [founder]. Only the founding
+     * device may, and only forward; see [MembershipRules].
+     */
+    fun raiseRules(
+        provider: CryptoProvider,
+        version: Int,
+        founder: DeviceKeys,
+        namespace: ProtocolNamespace = ProtocolNamespace.Default,
+        resolver: SuiteResolver = SuiteRegistry,
+    ): MembershipLog = append(
+        provider = provider,
+        op = MembershipOp.RULES,
+        deviceIdentity = founder.identity,
+        wrappedKeys = MembershipRules.payload(version),
+        signer = founder.signingKeyPair,
+        namespace = namespace,
+        resolver = resolver,
+    )
 
     private fun epochCount(): Int = entriesSnapshot.count { advancesEpoch(it) }
 

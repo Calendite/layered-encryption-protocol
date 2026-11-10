@@ -142,7 +142,7 @@ list is an **append-only, hash-chained log**, every entry signed by an existing
 member device (Keybase sigchain / Matrix cross-signing pattern):
 
 ```
-entry_n = { prev_hash, op: add|revoke|rotate, device_pubkey, wrapped_keys?, sig }
+entry_n = { prev_hash, op: add|revoke|rotate|suite_upgrade|rules, device_pubkey, wrapped_keys?, sig }
 ```
 
 Clients verify the full chain before honouring any membership change. Signing is hybrid
@@ -155,7 +155,18 @@ member — the entry that ejects a device is the entry it cannot read), and `rot
 membership change; a self-signed rekey whose mandatory `wrapped_keys` seals a fresh context
 key to every active member). `rotate` exists because fork resolution can drop a key-holder
 with nobody left to revoke — a member added on a losing branch — and doubles as the periodic
-or post-compromise rekey primitive.
+or post-compromise rekey primitive. `suite_upgrade` moves the context to a new cryptographic suite;
+`rules` moves it to a newer set of membership rules (below).
+
+**Who may add and remove: the rules version.** Every context starts under rules **1, founder
+only**: only the founding device may `add`, and only it may `revoke` itself. A `rules` entry,
+signed by the founder, carrying one version byte, moves the context forward and never back, to a
+version the verifier knows (an unknown version, or a `rules` op an older verifier does not know,
+fails the whole log). Under rules **2, any member**, any active member may `add`, and any member may
+`revoke` any other, the founder included. That is safe only where joining a context grants access
+to nothing by itself: Calendite moves to it with per-calendar keys, where each owner hands their own
+calendar's key to each newcomer separately. Rules apply from their entry onwards: an unauthorised
+`add` earlier in the chain stays invalid.
 
 **Fork resolution is enforced, not advisory.** Two branches appended concurrently reconcile
 by removal precedence (most revocations, then length, then head hash), and the resolving
