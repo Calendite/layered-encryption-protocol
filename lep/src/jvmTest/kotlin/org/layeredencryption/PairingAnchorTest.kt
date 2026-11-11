@@ -108,6 +108,16 @@ class PairingAnchorTest {
     }
 
     @Test
+    fun theOldLogStillInTheMailboxIsAskedForAgain_untilTheNewOneArrives() = runTest {
+        val before = group(others = 3)
+        var asked = 0
+        val late = PairingFerry.LogFetcher { if (++asked < 3) before.serialise() else mailbox }
+        val (invited, joined, _) = pair(before, anchorAbove = 0, fetch = late)
+        assertEquals(3, asked)
+        assertContentEquals(invited.membershipLog.serialise(), joined.membershipLog.serialise())
+    }
+
+    @Test
     fun anotherGroupsLogIsRefused() = runTest {
         val elsewhere = DeviceKeys.generate(provider)
         val foreign = PairingFerry.LogFetcher {

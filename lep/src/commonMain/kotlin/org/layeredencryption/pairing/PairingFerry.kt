@@ -172,6 +172,29 @@ object PairingFerry {
         }
     }
 
+    /** How many times a joiner asks for the log before giving up: the mailbox may still hold the old one. */
+    private const val LOG_FETCHES = 30
+
+    /**
+     * Fetches until a log holding this joiner's entry arrives. The mailbox can still hold the log
+     * from before the inviter's upload, which verifies and is refused for lacking the entry; the
+     * [LogFetcher] paces the asking, and a null from it means it has given up.
+     */
+    private suspend fun adoptFetched(joiner: Joiner, fetch: LogFetcher) {
+        var refusal: PairingException? = null
+        repeat(LOG_FETCHES) {
+            val log = fetch.fetch(joiner.calendarKeys())
+                ?: throw refusal ?: PairingException("The group's log never reached its mailbox")
+            try {
+                joiner.adoptFetchedLog(log)
+                return
+            } catch (e: PairingException) {
+                refusal = e
+            }
+        }
+        throw refusal ?: PairingException("The group's log never reached its mailbox")
+    }
+
     /** The joining ceremony body, driving a constructed session. */
     internal suspend fun ferryJoiner(
         channel: FrameChannel,
@@ -196,8 +219,7 @@ object PairingFerry {
                 is InviterAnchor -> {
                     joiner.onInviterAnchor(finish, confirmation)
                     val fetch = fetchLog ?: throw PairingException("The group's log was too big to send, and this device has nowhere to fetch it from")
-                    val log = fetch.fetch(joiner.calendarKeys()) ?: throw PairingException("The group's log never reached its mailbox")
-                    joiner.adoptFetchedLog(log)
+                    adoptFetched(joiner, fetch)
                 }
             }
             return PairingResult(
