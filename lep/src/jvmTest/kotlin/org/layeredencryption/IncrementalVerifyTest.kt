@@ -70,6 +70,18 @@ class IncrementalVerifyTest {
     }
 
     @Test
+    fun alteredEarlierEntriesBehindAVerifiedTailAreCaught() {
+        val log = groupOf(8)
+        log.verify(provider)
+        val entries = log.entries.toMutableList()
+        // Every entry genuine and the last one the same, but two earlier ones swapped: the chain
+        // breaks, and the cached state for that last entry is another history's.
+        entries[2] = entries[3].also { entries[3] = entries[2] }
+        val swapped = MembershipLog.deserialise(entries.fold(FrameWriter()) { w, e -> w.putBytes(e.serialise()) }.toByteArray())
+        assertIs<MembershipVerification.Invalid>(swapped.verify(provider))
+    }
+
+    @Test
     fun aForgedEntryAfterAVerifiedPrefixIsStillCaught() {
         val log = groupOf(6)
         log.verify(provider)

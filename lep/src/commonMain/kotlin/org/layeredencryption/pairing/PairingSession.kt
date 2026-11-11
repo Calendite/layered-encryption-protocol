@@ -320,8 +320,9 @@ class Inviter(
         val log = base.append(
             provider, MembershipOp.ADD, joiner, wrappedMasterKey,
             signer = device.signingKeyPair, namespace = namespace, resolver = negotiated.resolver,
-        )
+        ).checkpointIfDue(provider, device, namespace = namespace, resolver = negotiated.resolver)
         membershipLog = log
+        joinerAdded = joiner.signingPublicKey
         val message = InviterComplete(log.serialise())
         stage = InviterStage.COMPLETED
         destroy()
@@ -343,8 +344,14 @@ class Inviter(
      */
     fun anchor(): InviterAnchor {
         val log = membershipLog ?: throw PairingException("anchor() called before complete()")
-        return InviterAnchor(log.entries.last().serialise())
+        val joiner = joinerAdded ?: throw PairingException("anchor() called before complete()")
+        // The joiner's ADD, which a checkpoint may follow (MembershipLog.checkpointIfDue).
+        val entry = log.entries.last { it.op == MembershipOp.ADD && it.deviceIdentity.signingPublicKey.contentEquals(joiner) }
+        return InviterAnchor(entry.serialise())
     }
+
+    /** The joiner's signing key, kept past [destroy] for [anchor]. */
+    private var joinerAdded: ByteArray? = null
 
     private companion object {
         const val MASTER_KEY_SIZE = 32
@@ -521,7 +528,8 @@ class Joiner(
         val handshakeKey = handshakeKey ?: throw PairingException("onInviterComplete() called before the handshake")
         val log = MembershipLog.deserialise(complete.membershipLog, negotiated.resolver)
 
-        val verification = log.verify(provider, namespace, negotiated.resolver)
+        // A newcomer starts from the latest checkpoint: the same trust it places in whoever added it.
+        val verification = log.verifyFromLatestCheckpoint(provider, namespace, negotiated.resolver)
         if (verification !is MembershipVerification.Valid) {
             throw PairingException("Membership log failed verification: $verification")
         }
@@ -587,7 +595,7 @@ class Joiner(
         } catch (e: Exception) {
             throw PairingException("The fetched membership log does not parse")
         }
-        val verification = log.verify(provider, namespace, negotiated.resolver)
+        val verification = log.verifyFromLatestCheckpoint(provider, namespace, negotiated.resolver)
         if (verification !is MembershipVerification.Valid) {
             throw PairingException("The fetched membership log failed verification: $verification")
         }

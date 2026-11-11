@@ -306,9 +306,10 @@ class SuiteUpgradeTest {
         assertEquals(MembershipOp.ROTATE, MembershipOp.fromCode(3))
         assertEquals(MembershipOp.SUITE_UPGRADE, MembershipOp.fromCode(4))
         assertEquals(MembershipOp.RULES, MembershipOp.fromCode(5))
-        // The same gate that makes a pre-agility app reject op 4, and a pre-rules app op 5, with
-        // their whole log.
-        assertFailsWith<IllegalArgumentException> { MembershipOp.fromCode(6) }
+        assertEquals(MembershipOp.CHECKPOINT, MembershipOp.fromCode(6))
+        // The same gate that makes a pre-agility app reject op 4, a pre-rules app op 5 and a
+        // pre-checkpoint app op 6, with their whole log.
+        assertFailsWith<IllegalArgumentException> { MembershipOp.fromCode(7) }
         assertFailsWith<IllegalArgumentException> { MembershipOp.fromCode(0) }
     }
 
