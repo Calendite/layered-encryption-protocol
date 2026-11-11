@@ -77,8 +77,11 @@ class InviterConfirm(inviterMac: ByteArray, sasNonce: ByteArray) {
     val sasNonce: ByteArray get() = _sasNonce.copyOf()
 }
 
+/** What the inviter's last message is: the whole log ([InviterComplete]) or the joiner's entry alone ([InviterAnchor]). */
+sealed interface InviterFinish
+
 /** Step 6: inviter → joiner. The membership log carrying the master key wrapped under K_handshake. */
-class InviterComplete(membershipLog: ByteArray) {
+class InviterComplete(membershipLog: ByteArray) : InviterFinish {
     init {
         require(membershipLog.size <= ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES) {
             "Membership log of ${membershipLog.size} bytes exceeds the ${ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES}-byte limit"
@@ -88,6 +91,29 @@ class InviterComplete(membershipLog: ByteArray) {
     private val _membershipLog = membershipLog.copyOf()
 
     val membershipLog: ByteArray get() = _membershipLog.copyOf()
+}
+
+/**
+ * Step 6, for a group whose log is too big for the channel the ceremony runs over: only the joiner's
+ * own ADD entry, which carries the joiner's keys wrapped under K_handshake. The joiner opens those
+ * ([Joiner.onInviterAnchor]), fetches the whole log from wherever the group keeps it (the relay
+ * mailbox, for Calendite), and accepts it only if it verifies and holds this exact entry
+ * ([Joiner.adoptFetchedLog]). A forged entry cannot unwrap under K_handshake, and a forged log
+ * cannot carry a genuinely signed entry, so the fetch needs no trust in the store it came from.
+ */
+class InviterAnchor(joinerEntry: ByteArray) : InviterFinish {
+    init {
+        require(joinerEntry.size <= MAX_ENTRY_BYTES) { "An ADD entry of ${joinerEntry.size} bytes is not one" }
+    }
+
+    private val _joinerEntry = joinerEntry.copyOf()
+
+    val joinerEntry: ByteArray get() = _joinerEntry.copyOf()
+
+    companion object {
+        /** An ADD entry: identity, wrapped keys and a signature, all well under this. */
+        const val MAX_ENTRY_BYTES = 64 * 1024
+    }
 }
 
 /**
@@ -311,6 +337,15 @@ class Inviter(
     /** The log this pairing founded, for persisting alongside the key; null before [complete]. */
     fun membershipLog(): MembershipLog? = membershipLog
 
+    /**
+     * The [InviterAnchor] for the log [complete] produced: the joiner's ADD, its last entry. Sent in
+     * place of the whole log when that would not fit the ceremony's channel.
+     */
+    fun anchor(): InviterAnchor {
+        val log = membershipLog ?: throw PairingException("anchor() called before complete()")
+        return InviterAnchor(log.entries.last().serialise())
+    }
+
     private companion object {
         const val MASTER_KEY_SIZE = 32
     }
@@ -323,7 +358,7 @@ class Inviter(
  * MAC ([onInviterHello]), verifies the inviter's MAC ([onInviterConfirm]) and — after the human SAS
  * comparison — verifies the membership log and unwraps the master key ([onInviterComplete]).
  */
-private enum class JoinerStage { AWAITING_HELLO, AWAITING_CONFIRM, AWAITING_SAS, SAS_CONFIRMED, COMPLETED }
+private enum class JoinerStage { AWAITING_HELLO, AWAITING_CONFIRM, AWAITING_SAS, SAS_CONFIRMED, AWAITING_LOG, COMPLETED }
 
 class Joiner(
     private val provider: CryptoProvider,
@@ -500,6 +535,68 @@ class Joiner(
         val unwrapped = suite.aead.open(provider, handshakeKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
         recoveredKeys = EpochKeys.deserialise(unwrapped)
             ?: throw PairingException("The wrapped keys did not decode")
+        membershipLog = log
+        stage = JoinerStage.COMPLETED
+        destroy()
+    }
+
+    /** The joiner's ADD entry from an [InviterAnchor], kept to check the fetched log against. */
+    private var anchorEntry: ByteArray? = null
+
+    /**
+     * Opens the keys in the joiner's own ADD entry, for a ceremony whose log is fetched rather than
+     * sent ([InviterAnchor]). Requires the [SasConfirmation] as [onInviterComplete] does. The
+     * handshake secrets are scrubbed at once; the ceremony completes in [adoptFetchedLog].
+     */
+    fun onInviterAnchor(anchor: InviterAnchor, confirmation: SasConfirmation) {
+        requireStage(JoinerStage.SAS_CONFIRMED)
+        if (confirmation.session !== this) throw PairingException("SAS confirmation belongs to a different session")
+        val handshakeKey = handshakeKey ?: throw PairingException("onInviterAnchor() called before the handshake")
+        val bytes = anchor.joinerEntry
+        val entry = try {
+            val reader = org.layeredencryption.FrameReader(bytes)
+            org.layeredencryption.membership.MembershipEntry.deserialise(reader, negotiated.resolver, suite).also { reader.expectEnd() }
+        } catch (e: Exception) {
+            throw PairingException("The inviter's anchor is not a membership entry")
+        }
+        if (entry.op != MembershipOp.ADD) throw PairingException("The inviter's anchor is not an ADD")
+        if (!entry.deviceIdentity.signingPublicKey.contentEquals(device.identity.signingPublicKey)) {
+            throw PairingException("The inviter's anchor adds somebody else")
+        }
+        val wrapped = entry.wrappedKeys ?: throw PairingException("No wrapped keys for this device")
+        val unwrapped = suite.aead.open(provider, handshakeKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
+        recoveredKeys = EpochKeys.deserialise(unwrapped) ?: throw PairingException("The wrapped keys did not decode")
+        anchorEntry = bytes
+        handshakeKey.fill(0)
+        this.handshakeKey = null
+        sharedSecret?.fill(0)
+        sharedSecret = null
+        stage = JoinerStage.AWAITING_LOG
+    }
+
+    /**
+     * Accepts the group's whole log, fetched after an [InviterAnchor]: it must verify, hold this
+     * device as an active member, and contain the very entry the inviter sent. A log that has grown
+     * since (somebody else joined in the meantime) is fine; one without the entry is refused.
+     */
+    fun adoptFetchedLog(serialised: ByteArray) {
+        requireStage(JoinerStage.AWAITING_LOG)
+        val anchor = anchorEntry ?: throw PairingException("No anchor to check the log against")
+        val log = try {
+            MembershipLog.deserialise(serialised, negotiated.resolver)
+        } catch (e: Exception) {
+            throw PairingException("The fetched membership log does not parse")
+        }
+        val verification = log.verify(provider, namespace, negotiated.resolver)
+        if (verification !is MembershipVerification.Valid) {
+            throw PairingException("The fetched membership log failed verification: $verification")
+        }
+        if (device.identity.signingPublicKey.toHexString() !in verification.activeMembers) {
+            throw PairingException("This device is not an active member of the fetched log")
+        }
+        if (log.entries.none { it.serialise().contentEquals(anchor) }) {
+            throw PairingException("The fetched membership log does not hold the entry the inviter sent")
+        }
         membershipLog = log
         stage = JoinerStage.COMPLETED
         destroy()

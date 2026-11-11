@@ -25,6 +25,11 @@ import org.layeredencryption.suite.SuiteResolver
  *   send InviterComplete ───────────▶ recv → unwrap master key
  * ```
  *
+ * A group whose log will not fit the channel ends differently: the inviter publishes the log where
+ * the group keeps it ([LogPublisher]) and sends only the joiner's ADD entry ([InviterAnchor]); the
+ * joiner opens its keys from that, fetches the log ([LogFetcher]) and accepts it only if it holds
+ * that entry. Below the threshold nothing changes, so a joiner on an older build is unaffected.
+ *
  * The protocol logic lives entirely in [Inviter]/[Joiner] — this file only ferries their
  * messages and gates on the humans. Over LAN, the inviter's phone *is* the mailbox: it listens
  * on the socket and its offer/hello are the posted bundle.
@@ -36,6 +41,16 @@ import org.layeredencryption.suite.SuiteResolver
  * either side closes the channel; the other side surfaces the closure as a failed pairing.
  */
 object PairingFerry {
+
+    /** Puts the log, with the joiner just added, where the joiner will fetch it; given the group's keys. */
+    fun interface LogPublisher {
+        suspend fun publish(log: org.layeredencryption.membership.MembershipLog, keys: org.layeredencryption.envelope.EpochKeys)
+    }
+
+    /** Fetches the group's log once the joiner holds its keys, or null when it never appeared. */
+    fun interface LogFetcher {
+        suspend fun fetch(keys: org.layeredencryption.envelope.EpochKeys): ByteArray?
+    }
 
     /**
      * Everything a completed ceremony hands the application: the context master key, every
@@ -66,6 +81,9 @@ object PairingFerry {
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
         resolver: SuiteResolver = SuiteRegistry,
         policy: PairingSuitePolicy = PairingSuitePolicy(),
+        /** The largest log sent whole; above it, [publishLog] and an [InviterAnchor]. Never, without one. */
+        anchorAboveBytes: Int = Int.MAX_VALUE,
+        publishLog: LogPublisher? = null,
         confirmSas: suspend (String) -> Boolean,
     ): PairingResult {
         val context = try {
@@ -78,7 +96,7 @@ object PairingFerry {
             channel.close()
             throw e
         }
-        return ferryInviter(channel, Inviter(provider, device, code, existing, namespace, context), confirmSas)
+        return ferryInviter(channel, Inviter(provider, device, code, existing, namespace, context), anchorAboveBytes, publishLog, confirmSas)
     }
 
     /**
@@ -94,6 +112,8 @@ object PairingFerry {
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
         resolver: SuiteResolver = SuiteRegistry,
         policy: PairingSuitePolicy = PairingSuitePolicy(),
+        /** Where to fetch the log when the inviter sends only an [InviterAnchor]; without one, that fails. */
+        fetchLog: LogFetcher? = null,
         confirmSas: suspend (String) -> Boolean,
     ): PairingResult {
         val context = try {
@@ -106,13 +126,15 @@ object PairingFerry {
             channel.close()
             throw e
         }
-        return ferryJoiner(channel, Joiner(provider, device, code, namespace, context), confirmSas)
+        return ferryJoiner(channel, Joiner(provider, device, code, namespace, context), fetchLog, confirmSas)
     }
 
     /** The inviting ceremony body, driving a constructed session. */
     internal suspend fun ferryInviter(
         channel: FrameChannel,
         inviter: Inviter,
+        anchorAboveBytes: Int = Int.MAX_VALUE,
+        publishLog: LogPublisher? = null,
         confirmSas: suspend (String) -> Boolean,
     ): PairingResult {
         try {
@@ -127,7 +149,17 @@ object PairingFerry {
             val confirmation = inviter.confirmSas() // the human gate: issues the token complete() requires
             PairingWire.decodeSasConfirmed(channel.receive()) // the joiner's human confirmed too
 
-            channel.send(PairingWire.encode(inviter.complete(confirmation)))
+            val complete = inviter.complete(confirmation)
+            if (publishLog != null && complete.membershipLog.size > anchorAboveBytes) {
+                // Published first, so the joiner finds it as soon as it has its keys.
+                publishLog.publish(
+                    inviter.membershipLog() ?: throw PairingException("Ceremony completed without a log"),
+                    inviter.calendarKeys(),
+                )
+                channel.send(PairingWire.encode(inviter.anchor()))
+            } else {
+                channel.send(PairingWire.encode(complete))
+            }
             return PairingResult(
                 inviter.masterKey(), inviter.calendarKeys(),
                 inviter.membershipLog() ?: throw PairingException("Ceremony completed without a log"),
@@ -144,6 +176,7 @@ object PairingFerry {
     internal suspend fun ferryJoiner(
         channel: FrameChannel,
         joiner: Joiner,
+        fetchLog: LogFetcher? = null,
         confirmSas: suspend (String) -> Boolean,
     ): PairingResult {
         try {
@@ -158,7 +191,15 @@ object PairingFerry {
             val confirmation = joiner.confirmSas() // the human gate: issues the token onInviterComplete() requires
             channel.send(PairingWire.encodeSasConfirmed())
 
-            joiner.onInviterComplete(PairingWire.decodeInviterComplete(channel.receive()), confirmation)
+            when (val finish = PairingWire.decodeInviterFinish(channel.receive())) {
+                is InviterComplete -> joiner.onInviterComplete(finish, confirmation)
+                is InviterAnchor -> {
+                    joiner.onInviterAnchor(finish, confirmation)
+                    val fetch = fetchLog ?: throw PairingException("The group's log was too big to send, and this device has nowhere to fetch it from")
+                    val log = fetch.fetch(joiner.calendarKeys()) ?: throw PairingException("The group's log never reached its mailbox")
+                    joiner.adoptFetchedLog(log)
+                }
+            }
             return PairingResult(
                 joiner.masterKey(), joiner.calendarKeys(),
                 joiner.membershipLog() ?: throw PairingException("Ceremony completed without a log"),

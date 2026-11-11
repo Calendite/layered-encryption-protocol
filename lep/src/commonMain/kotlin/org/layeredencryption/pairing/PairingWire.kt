@@ -29,6 +29,7 @@ object PairingWire {
     const val TAG_INVITER_COMPLETE = 5
     const val TAG_SUITE_OFFER = 6
     const val TAG_SUITE_ACCEPT = 7
+    const val TAG_INVITER_ANCHOR = 8
 
     private const val TAG_BYTES = 1
     private const val LENGTH_PREFIX = 4
@@ -129,6 +130,21 @@ object PairingWire {
         .putByte(TAG_INVITER_COMPLETE)
         .putBytes(message.membershipLog)
         .toByteArray()
+
+    fun encode(message: InviterAnchor): ByteArray = FrameWriter()
+        .putByte(TAG_INVITER_ANCHOR)
+        .putBytes(message.joinerEntry)
+        .toByteArray()
+
+    /** The inviter's last message, whichever of the two it sent. */
+    fun decodeInviterFinish(frame: ByteArray): InviterFinish =
+        if (frame.isNotEmpty() && frame[0].toInt() == TAG_INVITER_ANCHOR) {
+            expect(frame, TAG_INVITER_ANCHOR, maxBytes = TAG_BYTES + LENGTH_PREFIX + InviterAnchor.MAX_ENTRY_BYTES) { reader ->
+                InviterAnchor(reader.readBytes(InviterAnchor.MAX_ENTRY_BYTES))
+            }
+        } else {
+            decodeInviterComplete(frame)
+        }
 
     fun decodeInviterComplete(frame: ByteArray): InviterComplete = expect(frame, TAG_INVITER_COMPLETE, maxBytes = INVITER_COMPLETE_MAX_BYTES) { reader ->
         InviterComplete(reader.readBytes(ProtocolLimits.MAX_MEMBERSHIP_LOG_BYTES))
