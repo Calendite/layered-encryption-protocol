@@ -59,7 +59,8 @@ enum class MembershipOp(val code: Int) {
      * [CheckpointPayload]. The subject is the signer, an active member. Every verifier that walks
      * the history recomputes the payload at this position and rejects a log whose checkpoint
      * disagrees, so a false one cannot pass anyone holding the history; a newcomer may start its
-     * check from the latest one ([MembershipLog.verifyFromLatestCheckpoint]). Allowed only under the
+     * check from the latest one before an entry it already trusts
+     * ([MembershipLog.verifyFromCheckpointBefore]). Allowed only under the
      * any-member rules, which a group reaches only once every device in it reads this op. Changes no
      * members and no keys.
      */
@@ -865,69 +866,90 @@ class MembershipLog private constructor(
         provider: CryptoProvider,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
         resolver: SuiteResolver = SuiteRegistry,
-    ): MembershipVerification {
+    ): MembershipVerification = strictWalk(provider, namespace, resolver).verdict
+
+    /** A walk's verdict and, when it reached the last entry, the state there (even if that state is not a valid end). */
+    private class Walked(val verdict: MembershipVerification, val state: WalkState?)
+
+    /**
+     * [verify]'s walk: from the longest prefix this process has fully verified, or from the founding
+     * entry, and remembering where it ends. Only walks that started from the founding entry, or from a
+     * state such a walk left, ever reach [VerifiedPrefixes]; nothing taken on a checkpoint's word does.
+     */
+    private fun strictWalk(provider: CryptoProvider, namespace: ProtocolNamespace, resolver: SuiteResolver): Walked {
         // An empty log has no genesis and therefore no founder; every other method here assumes
         // entry zero exists. Calling it valid-with-no-members would let a wiped log verify.
-        if (entriesSnapshot.isEmpty()) return MembershipVerification.Invalid("Empty log has no genesis entry", 0)
+        if (entriesSnapshot.isEmpty()) return Walked(MembershipVerification.Invalid("Empty log has no genesis entry", 0), null)
+        // Resume from the longest prefix this process has already verified (Membership_Log_Checkpoints.md,
+        // stage 1): a cached walk state is keyed by its last entry's hash, which chains to everything
+        // before it, so it can only be reused for exactly the history it was computed from.
+        val walked = VerifiedPrefixes.longestFor(this, provider, namespace, resolver)
+            ?.let { (count, state) -> walk(count, state, provider, namespace, resolver) }
+            ?: walkFromGenesis(provider, namespace, resolver)
+        walked.state?.let { VerifiedPrefixes.remember(it, namespace, resolver) }
+        return walked
+    }
 
-        val members = mutableSetOf<String>()
-        var expectedPrevious = MembershipEntry.GENESIS_PREVIOUS_HASH
-        var inKeylessBatch = false
+    private fun walkFromGenesis(provider: CryptoProvider, namespace: ProtocolNamespace, resolver: SuiteResolver): Walked {
         // The genesis identity defines the founding suite — a context can be founded under any
         // registered suite. SUITE_UPGRADE entries move the era forward, and each historical
         // entry verifies under the suite that was active when it was made.
         val foundingSuiteId = entriesSnapshot.first().deviceIdentity.suiteId
         if (!resolver.contains(foundingSuiteId)) {
-            return MembershipVerification.Invalid("Unknown founding suite ${foundingSuiteId.value}", 0)
+            return Walked(MembershipVerification.Invalid("Unknown founding suite ${foundingSuiteId.value}", 0), null)
         }
-        var activeSuite = resolver.require(foundingSuiteId)
-        var epoch = 0
-        var rules = MembershipRules.FOUNDER_ONLY
+        val before = WalkState(
+            members = emptySet(), identities = emptyMap(), lastHash = MembershipEntry.GENESIS_PREVIOUS_HASH,
+            inKeylessBatch = false, suiteId = foundingSuiteId, epoch = 0, rules = MembershipRules.FOUNDER_ONLY,
+        )
+        return walk(0, before, provider, namespace, resolver)
+    }
 
-        // Resume from the longest prefix this process has already verified (Membership_Log_Checkpoints.md,
-        // stage 1): a cached walk state is keyed by its last entry's hash, which chains to everything
-        // before it, so it can only be reused for exactly the history it was computed from.
-        val identities = mutableMapOf<String, ByteArray>()
-        var start = 0
-        VerifiedPrefixes.longestFor(this, provider, namespace, resolver)?.let { (count, state) ->
-            members += state.members
-            identities += state.identities
-            expectedPrevious = state.lastHash
-            inKeylessBatch = state.inKeylessBatch
-            activeSuite = resolver.require(state.suiteId)
-            epoch = state.epoch
-            rules = state.rules
-            start = count
-        }
+    /** Checks every entry from [start] on, starting in state [before]. Records nothing. */
+    private fun walk(
+        start: Int,
+        before: WalkState,
+        provider: CryptoProvider,
+        namespace: ProtocolNamespace,
+        resolver: SuiteResolver,
+    ): Walked {
+        fun invalid(reason: String, index: Int) = Walked(MembershipVerification.Invalid(reason, index), null)
+        val members = before.members.toMutableSet()
+        val identities = before.identities.toMutableMap()
+        var expectedPrevious = before.lastHash
+        var inKeylessBatch = before.inKeylessBatch
+        var activeSuite = resolver.require(before.suiteId)
+        var epoch = before.epoch
+        var rules = before.rules
 
-        entriesSnapshot.forEachIndexed { index, entry ->
-            if (index < start) return@forEachIndexed
+        for (index in start until entriesSnapshot.size) {
+            val entry = entriesSnapshot[index]
             if (!entry.previousHash.contentEquals(expectedPrevious)) {
-                return MembershipVerification.Invalid("Broken hash chain", index)
+                return invalid("Broken hash chain", index)
             }
             // Identity bindings are artifacts of identity *creation* and verify under the
             // identity's own (self-described) suite; entry signatures are live per-era
             // operations and route through the active suite.
             if (!resolver.contains(entry.deviceIdentity.suiteId)) {
-                return MembershipVerification.Invalid("Unknown identity suite ${entry.deviceIdentity.suiteId.value}", index)
+                return invalid("Unknown identity suite ${entry.deviceIdentity.suiteId.value}", index)
             }
             if (!entry.deviceIdentity.verifyBinding(provider, namespace, resolver)) {
-                return MembershipVerification.Invalid("Invalid device-identity binding", index)
+                return invalid("Invalid device-identity binding", index)
             }
             if (!activeSuite.signature.verify(provider, entry.signerPublicKey, entry.unsignedBytes(namespace), entry.signature)) {
-                return MembershipVerification.Invalid("Invalid signature", index)
+                return invalid("Invalid signature", index)
             }
             if (inKeylessBatch &&
                 !(entry.op == MembershipOp.REVOKE && !entry.hasWrappedKeys) &&
                 entry.op != MembershipOp.ROTATE &&
                 entry.op != MembershipOp.SUITE_UPGRADE
             ) {
-                return MembershipVerification.Invalid("A keyless revocation batch must terminate in its rotation", index)
+                return invalid("A keyless revocation batch must terminate in its rotation", index)
             }
             val authorisationFailure = checkAuthorisation(index, entry, members, activeSuite, rules)
             if (authorisationFailure != null) {
                 Diagnostics.debug(LepTag.MEMBERSHIP) { "log invalid at entry $index: $authorisationFailure" }
-                return MembershipVerification.Invalid(authorisationFailure, index)
+                return invalid(authorisationFailure, index)
             }
             var nextSuite: ProtocolSuite? = null
             if (entry.op == MembershipOp.SUITE_UPGRADE) {
@@ -935,7 +957,7 @@ class MembershipLog private constructor(
                 val failure = upgrade.failure
                 if (failure != null) {
                     Diagnostics.debug(LepTag.MEMBERSHIP) { "log invalid at entry $index: $failure" }
-                    return MembershipVerification.Invalid(failure, index)
+                    return invalid(failure, index)
                 }
                 nextSuite = upgrade.newSuite
             }
@@ -945,11 +967,11 @@ class MembershipLog private constructor(
             if (advancesEpoch(entry)) epoch += 1
             if (entry.op == MembershipOp.CHECKPOINT) {
                 val claimed = CheckpointPayload.parse(entry.wrappedKeys)
-                    ?: return MembershipVerification.Invalid("Checkpoint payload does not parse", index)
+                    ?: return invalid("Checkpoint payload does not parse", index)
                 val actual = CheckpointPayload.of(this, provider, namespace, index, identities, epoch, rules, activeSuite.id)
                 if (!claimed.sameAs(actual)) {
                     Diagnostics.debug(LepTag.MEMBERSHIP) { "log invalid at entry $index: checkpoint disagrees with the history before it" }
-                    return MembershipVerification.Invalid("Checkpoint disagrees with the history before it", index)
+                    return invalid("Checkpoint disagrees with the history before it", index)
                 }
             }
             nextSuite?.let { activeSuite = it }
@@ -961,17 +983,15 @@ class MembershipLog private constructor(
             inKeylessBatch = entry.op == MembershipOp.REVOKE && !entry.hasWrappedKeys
             expectedPrevious = entry.hash(provider, namespace)
         }
-        VerifiedPrefixes.remember(
-            WalkState(members.toSet(), identities.toMap(), expectedPrevious, inKeylessBatch, activeSuite.id, epoch, rules),
-            namespace, resolver,
-        )
+        val after = WalkState(members.toSet(), identities.toMap(), expectedPrevious, inKeylessBatch, activeSuite.id, epoch, rules)
         if (inKeylessBatch) {
-            return MembershipVerification.Invalid(
+            val verdict = MembershipVerification.Invalid(
                 "Log ends in an unterminated keyless revocation — truncated before its rotation",
                 entriesSnapshot.lastIndex,
             )
+            return Walked(verdict, after)
         }
-        return MembershipVerification.Valid(members.toSet())
+        return Walked(MembershipVerification.Valid(members.toSet()), after)
     }
 
     /** Finds the entry that added the device with [signingPublicKey], if any (to read its wrapped keys). */
@@ -1168,10 +1188,11 @@ class MembershipLog private constructor(
         resolver: SuiteResolver = SuiteRegistry,
     ): MembershipLog {
         require(rulesVersion() >= MembershipRules.ANY_MEMBER) { "Checkpoints need the any-member rules" }
-        require(verify(provider, namespace, resolver) is MembershipVerification.Valid) { "Only a log that verifies can be checkpointed" }
-        val state = VerifiedPrefixes.longestFor(this, provider, namespace, resolver)
-            ?.takeIf { (count, _) -> count == entriesSnapshot.size }?.second
-            ?: throw IllegalStateException("The verified state was not kept")
+        // The state comes from this walk itself, not from the cache, which another thread may have
+        // emptied since.
+        val walked = strictWalk(provider, namespace, resolver)
+        require(walked.verdict is MembershipVerification.Valid) { "Only a log that verifies can be checkpointed" }
+        val state = checkNotNull(walked.state) { "A valid walk ends in a state" }
         val payload = CheckpointPayload.of(this, provider, namespace, entriesSnapshot.size, state.identities, state.epoch, state.rules, state.suiteId)
         return append(provider, MembershipOp.CHECKPOINT, signer.identity, payload.serialise(), signer.signingKeyPair, namespace, resolver)
     }
@@ -1198,54 +1219,72 @@ class MembershipLog private constructor(
     }
 
     /**
-     * [verify], for a device seeing this group for the first time: everything before the latest
-     * checkpoint is taken on that checkpoint's word, after checking that the history hashes up to
-     * it, and the walk continues from its summary. The trust a newcomer places in the member who
-     * wrote it is the trust it places in whoever added it (Membership_Log_Checkpoints.md). With no
-     * checkpoint this is [verify]. Every later [verify] in the process resumes from here.
+     * [verify], for a device seeing this group for the first time, which has the entry at [anchor]
+     * from somebody it already trusts: for a joiner, its own ADD, signed by the inviter it compared a
+     * SAS with. That entry's hash chain pins every entry before it, so the latest checkpoint before
+     * [anchor] may be taken on its word, after checking that the history hashes up to it: the trust a
+     * newcomer places in the member who wrote it is the trust it places in whoever added it
+     * (Membership_Log_Checkpoints.md). Every entry from that checkpoint on, the anchor included, is
+     * walked in full, so a checkpoint after [anchor] is recomputed like any other and the relay that
+     * delivered the log cannot add one of its own. With no checkpoint before [anchor] this is [verify].
+     *
+     * The caller must check that the entry at [anchor] is the one it trusts; this checks the rest.
+     * Nothing taken on the checkpoint's word is remembered for a later [verify], which keeps
+     * walking from the founding entry until a full walk of its own has been done.
      */
-    fun verifyFromLatestCheckpoint(
+    fun verifyFromCheckpointBefore(
+        anchor: Int,
         provider: CryptoProvider,
         namespace: ProtocolNamespace = ProtocolNamespace.Default,
         resolver: SuiteResolver = SuiteRegistry,
     ): MembershipVerification {
-        val at = entriesSnapshot.indexOfLast { it.op == MembershipOp.CHECKPOINT }
-        if (at <= 0 || VerifiedPrefixes.longestFor(this, provider, namespace, resolver) != null) {
-            return verify(provider, namespace, resolver)
-        }
+        require(anchor in entriesSnapshot.indices) { "The anchor $anchor is not an entry of this log" }
+        val at = (anchor - 1 downTo 1).firstOrNull { entriesSnapshot[it].op == MembershipOp.CHECKPOINT }
+            ?: return verify(provider, namespace, resolver)
+        // A fully verified prefix reaching past the checkpoint is both cheaper and stronger than it.
+        val verified = VerifiedPrefixes.longestFor(this, provider, namespace, resolver)?.first ?: 0
+        if (verified > at) return verify(provider, namespace, resolver)
+        val trusted = takeCheckpointOnTrust(at, provider, namespace, resolver)
+        val state = trusted.state ?: return trusted.verdict
+        return walk(at + 1, state, provider, namespace, resolver).verdict
+    }
+
+    /**
+     * The state the checkpoint at [at] describes, once the history before it hashes up to it, it
+     * names this group and its own position, and its signer is one it lists and signed it. Its
+     * payload is believed, not recomputed: callers must already trust an entry after it.
+     */
+    private fun takeCheckpointOnTrust(at: Int, provider: CryptoProvider, namespace: ProtocolNamespace, resolver: SuiteResolver): Walked {
+        fun invalid(reason: String, index: Int = at) = Walked(MembershipVerification.Invalid(reason, index), null)
         var expected = MembershipEntry.GENESIS_PREVIOUS_HASH
         for (index in 0 until at) {
-            if (!entriesSnapshot[index].previousHash.contentEquals(expected)) return MembershipVerification.Invalid("Broken hash chain", index)
+            if (!entriesSnapshot[index].previousHash.contentEquals(expected)) return invalid("Broken hash chain", index)
             expected = entriesSnapshot[index].hash(provider, namespace)
         }
         val entry = entriesSnapshot[at]
-        if (!entry.previousHash.contentEquals(expected)) return MembershipVerification.Invalid("Broken hash chain", at)
-        val payload = CheckpointPayload.parse(entry.wrappedKeys)
-            ?: return MembershipVerification.Invalid("Checkpoint payload does not parse", at)
+        if (!entry.previousHash.contentEquals(expected)) return invalid("Broken hash chain")
+        val payload = CheckpointPayload.parse(entry.wrappedKeys) ?: return invalid("Checkpoint payload does not parse")
         if (payload.entryCount != at || payload.rules < MembershipRules.ANY_MEMBER) {
-            return MembershipVerification.Invalid("Checkpoint does not describe its own position", at)
+            return invalid("Checkpoint does not describe its own position")
         }
         if (!payload.genesisHash.contentEquals(entriesSnapshot.first().hash(provider, namespace))) {
-            return MembershipVerification.Invalid("Checkpoint names another group", at)
+            return invalid("Checkpoint names another group")
         }
         val suiteId = SuiteId(payload.suiteId.toUShort())
-        if (!resolver.contains(suiteId)) return MembershipVerification.Invalid("Unknown checkpoint suite", at)
+        if (!resolver.contains(suiteId)) return invalid("Unknown checkpoint suite")
         val suite = resolver.require(suiteId)
-        val identities = payload.members.associateBy { bytes ->
-            DeviceIdentity.deserialise(bytes, resolver).signingPublicKey.toHexString()
-        }
+        val identities = runCatching {
+            payload.members.associateBy { bytes -> DeviceIdentity.deserialise(bytes, resolver).signingPublicKey.toHexString() }
+        }.getOrNull() ?: return invalid("Checkpoint lists a member that does not parse")
         val signer = entry.signerPublicKey.toHexString()
         if (signer !in identities || entry.deviceIdentity.signingPublicKey.toHexString() != signer) {
-            return MembershipVerification.Invalid("Checkpoint signed by someone it does not list", at)
+            return invalid("Checkpoint signed by someone it does not list")
         }
         if (!suite.signature.verify(provider, entry.signerPublicKey, entry.unsignedBytes(namespace), entry.signature)) {
-            return MembershipVerification.Invalid("Invalid signature", at)
+            return invalid("Invalid signature")
         }
-        VerifiedPrefixes.remember(
-            WalkState(identities.keys, identities, entry.hash(provider, namespace), false, suiteId, payload.epoch, payload.rules),
-            namespace, resolver,
-        )
-        return verify(provider, namespace, resolver)
+        val state = WalkState(identities.keys, identities, entry.hash(provider, namespace), false, suiteId, payload.epoch, payload.rules)
+        return Walked(MembershipVerification.Valid(identities.keys), state)
     }
 
     fun rulesVersion(): Int = entriesSnapshot

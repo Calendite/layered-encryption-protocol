@@ -98,8 +98,11 @@ class InviterComplete(membershipLog: ByteArray) : InviterFinish {
  * own ADD entry, which carries the joiner's keys wrapped under K_handshake. The joiner opens those
  * ([Joiner.onInviterAnchor]), fetches the whole log from wherever the group keeps it (the relay
  * mailbox, for Calendite), and accepts it only if it verifies and holds this exact entry
- * ([Joiner.adoptFetchedLog]). A forged entry cannot unwrap under K_handshake, and a forged log
- * cannot carry a genuinely signed entry, so the fetch needs no trust in the store it came from.
+ * ([Joiner.adoptFetchedLog]). The entry must be signed by the inviter the joiner compared a SAS
+ * with, and it chains by hash to every entry before it, so the store cannot change those; a
+ * checkpoint is taken on trust only among them, and every entry after the anchor is checked in full
+ * from there. So the fetch needs no trust in the store it came from: a store can withhold the log,
+ * not alter what the joiner accepts.
  */
 class InviterAnchor(joinerEntry: ByteArray) : InviterFinish {
     init {
@@ -399,6 +402,14 @@ class Joiner(
     private var destroyed = false
 
     /**
+     * The inviter's signing key, from its hello. The hello rides the transcript both MACs and the SAS
+     * cover, so once the SAS is confirmed this is the key of the device the human compared with, and
+     * the joiner's ADD must be signed by it: that entry's hash chain is all the joiner trusts of a log
+     * that reached it through anyone else.
+     */
+    private var inviterSigningKey: ByteArray? = null
+
+    /**
      * Scrubs the session-scoped secrets — the handshake key, KEM shared secret, and expected
      * MAC — and rejects further protocol steps. Runs automatically when [onInviterComplete]
      * succeeds; on a failure path the caller runs it, as [PairingFerry] does in its `finally`.
@@ -465,6 +476,7 @@ class Joiner(
             this.sasCommitment = hello.sasCommitment
             this.sharedSecret = encapsulation.sharedSecret
             this.transcript = transcript
+            this.inviterSigningKey = hello.inviterDeviceIdentity.signingPublicKey
             transferred = true
             this.expectedInviterMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.INVITER)
             val joinerMac = Handshake.transcriptMac(provider, handshakeKey, codeSecret, transcript, PairingRole.JOINER)
@@ -528,17 +540,21 @@ class Joiner(
         val handshakeKey = handshakeKey ?: throw PairingException("onInviterComplete() called before the handshake")
         val log = MembershipLog.deserialise(complete.membershipLog, negotiated.resolver)
 
-        // A newcomer starts from the latest checkpoint: the same trust it places in whoever added it.
-        val verification = log.verifyFromLatestCheckpoint(provider, namespace, negotiated.resolver)
+        // The channel the log came over is not authenticated, only this device's ADD in it is, by the
+        // inviter's signature: a newcomer may start from a checkpoint that ADD's hash chain pins.
+        val ownKey = device.identity.signingPublicKey
+        val anchor = log.entries.indexOfLast { it.op == MembershipOp.ADD && it.deviceIdentity.signingPublicKey.contentEquals(ownKey) }
+        if (anchor < 0) throw PairingException("This device is not in the membership log")
+        val entry = log.entries[anchor]
+        requireSignedByInviter(entry)
+        val verification = log.verifyFromCheckpointBefore(anchor, provider, namespace, negotiated.resolver)
         if (verification !is MembershipVerification.Valid) {
             throw PairingException("Membership log failed verification: $verification")
         }
-        val ownKey = device.identity.signingPublicKey
         if (ownKey.toHexString() !in verification.activeMembers) {
             throw PairingException("This device is not in the membership log")
         }
 
-        val entry = log.addEntryFor(ownKey) ?: throw PairingException("No ADD entry for this device")
         val wrapped = entry.wrappedKeys ?: throw PairingException("No wrapped keys for this device")
         val unwrapped = suite.aead.open(provider, handshakeKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
         recoveredKeys = EpochKeys.deserialise(unwrapped)
@@ -571,6 +587,7 @@ class Joiner(
         if (!entry.deviceIdentity.signingPublicKey.contentEquals(device.identity.signingPublicKey)) {
             throw PairingException("The inviter's anchor adds somebody else")
         }
+        requireSignedByInviter(entry)
         val wrapped = entry.wrappedKeys ?: throw PairingException("No wrapped keys for this device")
         val unwrapped = suite.aead.open(provider, handshakeKey, wrapped, aad = device.identity.serialise(), namespace = namespace)
         recoveredKeys = EpochKeys.deserialise(unwrapped) ?: throw PairingException("The wrapped keys did not decode")
@@ -583,9 +600,11 @@ class Joiner(
     }
 
     /**
-     * Accepts the group's whole log, fetched after an [InviterAnchor]: it must verify, hold this
-     * device as an active member, and contain the very entry the inviter sent. A log that has grown
-     * since (somebody else joined in the meantime) is fine; one without the entry is refused.
+     * Accepts the group's whole log, fetched after an [InviterAnchor]: it must contain the very entry
+     * the inviter sent, verify, and hold this device as an active member. A log that has grown since
+     * (somebody else joined in the meantime) is fine; one without the entry is refused. The mailbox it
+     * came from is trusted for nothing: a checkpoint is taken on its word only before the inviter's
+     * entry, whose hash chain pins it, and everything from there on is checked entry by entry.
      */
     fun adoptFetchedLog(serialised: ByteArray) {
         requireStage(JoinerStage.AWAITING_LOG)
@@ -595,19 +614,25 @@ class Joiner(
         } catch (e: Exception) {
             throw PairingException("The fetched membership log does not parse")
         }
-        val verification = log.verifyFromLatestCheckpoint(provider, namespace, negotiated.resolver)
+        val at = log.entries.indexOfFirst { it.serialise().contentEquals(anchor) }
+        if (at < 0) throw PairingException("The fetched membership log does not hold the entry the inviter sent")
+        val verification = log.verifyFromCheckpointBefore(at, provider, namespace, negotiated.resolver)
         if (verification !is MembershipVerification.Valid) {
             throw PairingException("The fetched membership log failed verification: $verification")
         }
         if (device.identity.signingPublicKey.toHexString() !in verification.activeMembers) {
             throw PairingException("This device is not an active member of the fetched log")
         }
-        if (log.entries.none { it.serialise().contentEquals(anchor) }) {
-            throw PairingException("The fetched membership log does not hold the entry the inviter sent")
-        }
         membershipLog = log
         stage = JoinerStage.COMPLETED
         destroy()
+    }
+
+    private fun requireSignedByInviter(entry: org.layeredencryption.membership.MembershipEntry) {
+        val inviter = inviterSigningKey ?: throw PairingException("No inviter to check the log against")
+        if (!entry.signerPublicKey.contentEquals(inviter)) {
+            throw PairingException("This device's entry in the log was not signed by the inviter")
+        }
     }
 
     /** Every context key recovered from the inviter; throws if pairing has not completed. */

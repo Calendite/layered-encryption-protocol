@@ -129,19 +129,19 @@ class CheckpointTest {
         val full = valid(log)
         VerifiedPrefixes.clear()
         provider.mlDsaChecks = 0
-        val fromCheckpoint = assertIs<MembershipVerification.Valid>(log.verifyFromLatestCheckpoint(provider)).activeMembers
+        val fromCheckpoint = assertIs<MembershipVerification.Valid>(log.verifyFromCheckpointBefore(log.entries.lastIndex, provider)).activeMembers
         assertEquals(full, fromCheckpoint)
         assertTrue(provider.mlDsaChecks <= 6, "the checkpoint and the entries after it, not the history (${provider.mlDsaChecks} checks)")
     }
 
     @Test
     fun aNewcomerStillRefusesAHistoryThatDoesNotHashUpToTheCheckpoint() {
-        val log = anyMemberGroup(CHECKPOINT_EVERY).checkpointIfDue(provider, founder)
+        val log = anyMemberGroup(CHECKPOINT_EVERY).checkpointIfDue(provider, founder).add()
         val entries = log.entries.toMutableList()
         // Swap two entries before the checkpoint: every signature is genuine, the chain is not.
         entries[3] = entries[4].also { entries[4] = entries[3] }
         val shuffled = MembershipLog.deserialise(entries.fold(FrameWriter()) { w, e -> w.putBytes(e.serialise()) }.toByteArray())
-        assertIs<MembershipVerification.Invalid>(shuffled.verifyFromLatestCheckpoint(provider))
+        assertIs<MembershipVerification.Invalid>(shuffled.verifyFromCheckpointBefore(shuffled.entries.lastIndex, provider))
     }
 
     @Test
@@ -149,7 +149,7 @@ class CheckpointTest {
         val leaving = DeviceKeys.generate(provider)
         val log = anyMemberGroup(CHECKPOINT_EVERY).add(who = leaving).checkpointIfDue(provider, founder)
         val after = log.revoke(provider, leaving.identity, provider.randomBytes(32), founder.signingKeyPair)
-        val members = assertIs<MembershipVerification.Valid>(after.verifyFromLatestCheckpoint(provider)).activeMembers
+        val members = assertIs<MembershipVerification.Valid>(after.verifyFromCheckpointBefore(after.entries.lastIndex, provider)).activeMembers
         assertTrue(leaving.identity.signingPublicKey.toHexString() !in members)
     }
 
