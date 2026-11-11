@@ -872,7 +872,22 @@ class MembershipLog private constructor(
         var epoch = 0
         var rules = MembershipRules.FOUNDER_ONLY
 
+        // Resume from the longest prefix this process has already verified (Membership_Log_Checkpoints.md,
+        // stage 1): a cached walk state is keyed by its last entry's hash, which chains to everything
+        // before it, so it can only be reused for exactly the history it was computed from.
+        var start = 0
+        VerifiedPrefixes.longestFor(this, provider, namespace, resolver)?.let { (count, state) ->
+            members += state.members
+            expectedPrevious = state.lastHash
+            inKeylessBatch = state.inKeylessBatch
+            activeSuite = resolver.require(state.suiteId)
+            epoch = state.epoch
+            rules = state.rules
+            start = count
+        }
+
         entriesSnapshot.forEachIndexed { index, entry ->
+            if (index < start) return@forEachIndexed
             if (!entry.previousHash.contentEquals(expectedPrevious)) {
                 return MembershipVerification.Invalid("Broken hash chain", index)
             }
@@ -918,6 +933,10 @@ class MembershipLog private constructor(
             inKeylessBatch = entry.op == MembershipOp.REVOKE && !entry.hasWrappedKeys
             expectedPrevious = entry.hash(provider, namespace)
         }
+        VerifiedPrefixes.remember(
+            WalkState(members.toSet(), expectedPrevious, inKeylessBatch, activeSuite.id, epoch, rules),
+            namespace, resolver,
+        )
         if (inKeylessBatch) {
             return MembershipVerification.Invalid(
                 "Log ends in an unterminated keyless revocation — truncated before its rotation",
@@ -1239,5 +1258,63 @@ class MembershipLog private constructor(
                 signature = suite.signature.sign(provider, signer.privateKey, unsigned),
             )
         }
+    }
+}
+
+/** Where a verification walk had got to after some entry: all a later walk needs to carry on from there. */
+internal class WalkState(
+    val members: Set<String>,
+    /** The hash of the last entry walked, which the next entry must chain to. */
+    val lastHash: ByteArray,
+    val inKeylessBatch: Boolean,
+    val suiteId: SuiteId,
+    val epoch: Int,
+    val rules: Int,
+)
+
+/**
+ * The walk states of logs this process has verified, so verifying one that extends them checks only
+ * the new entries (Membership_Log_Checkpoints.md, stage 1). Verifying a log means checking every
+ * signature from the founding entry, and an app checks its log several times a sync round, so in a
+ * big group most of that work was re-proving history that had not changed.
+ *
+ * A state is reused only for a log whose entry at the same position hashes the same, under the same
+ * namespace and suite resolver, which pins exactly the history it was computed from. Bounded, and
+ * copied on write so concurrent verifications never see a half-updated list; a lost update only
+ * costs one walk.
+ */
+internal object VerifiedPrefixes {
+    private const val CAPACITY = 64
+
+    private class Remembered(val state: WalkState, val namespace: ProtocolNamespace, val resolver: SuiteResolver)
+
+    @kotlin.concurrent.Volatile
+    private var remembered: List<Remembered> = emptyList()
+
+    fun remember(state: WalkState, namespace: ProtocolNamespace, resolver: SuiteResolver) {
+        val kept = remembered.filterNot { it.state.lastHash.contentEquals(state.lastHash) }
+        remembered = (listOf(Remembered(state, namespace, resolver)) + kept).take(CAPACITY)
+    }
+
+    /** The longest verified prefix of [log], as (entries it covers, the state after them), or null. */
+    fun longestFor(
+        log: MembershipLog,
+        provider: CryptoProvider,
+        namespace: ProtocolNamespace,
+        resolver: SuiteResolver,
+    ): Pair<Int, WalkState>? {
+        val candidates = remembered.filter { it.resolver === resolver && it.namespace.vendor == namespace.vendor }
+        if (candidates.isEmpty()) return null
+        val entries = log.entries
+        for (index in entries.indices.reversed()) {
+            val hash = entries[index].hash(provider, namespace)
+            candidates.firstOrNull { it.state.lastHash.contentEquals(hash) }?.let { return (index + 1) to it.state }
+        }
+        return null
+    }
+
+    /** For tests: forget everything verified so far. */
+    fun clear() {
+        remembered = emptyList()
     }
 }
