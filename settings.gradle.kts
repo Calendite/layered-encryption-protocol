@@ -1,5 +1,8 @@
 rootProject.name = "layered-encryption-protocol"
 
+// The lowest version of each flagged library any configuration may resolve, build scripts included.
+apply(from = "gradle/dependency-floors.settings.gradle.kts")
+
 pluginManagement {
     repositories {
         google()
